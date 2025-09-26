@@ -1,0 +1,7 @@
+# Executables
+test
+prime_check
+
+# Cache and LSP files
+.cache/
+.asm-lsp.toml
