@@ -94,3 +94,30 @@ char *strcat(char *dest, const char *src)
 
     return tmp;
 }
+
+// implement a simple itoa function to print loaded task num
+char *itoa(int value, char *buffer, int base) {
+    if (base != 10 || value > INT32_MAX)
+        return NULL;
+    if (value == 0) {
+        *(buffer) = '0';
+        *(buffer + 1) = '\0';
+        return buffer;
+    }
+    char temp_buf[32];
+    int temp_ptr = 31;
+    while (value > 0) {
+        temp_buf[temp_ptr] = value % base + '0';
+        value = value / base;
+        temp_ptr--;
+    }
+    temp_ptr++;
+    char *copy_ptr = buffer;
+    while (temp_ptr < 32) {
+        *copy_ptr = temp_buf[temp_ptr];
+        copy_ptr++;
+        temp_ptr++;
+    }
+    *(copy_ptr) = '\0';
+    return buffer;
+}

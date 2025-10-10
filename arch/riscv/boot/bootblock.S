@@ -17,15 +17,32 @@ main:
 	fence
 
 	// TODO: [p1-task1] call BIOS to print string "It's bootblock!"
+  la a0, boot_msg
+  li a7, BIOS_PUTSTR
+  jal bios_func_entry
 
 
 	// TODO: [p1-task2] call BIOS to read kernel in SD card
+  // a1: hold os_size
+  // t0: hold os_size_loc
+  // first load os_size in a1
+  li t0, os_size_loc
+  lh a1, (t0)
+  // a0: param1, for mem_address
+  // a1: param2, for num_of_block
+  // a2: param3, for block_id
+  // prepare to call `bios_sd_read`
+  li a0, kernel
+  li a2, 1
+  li a7, BIOS_SDREAD
+  jal bios_func_entry
 
 
 	// TODO: [p1-task4] load task-related arguments and pass them to kernel
 
 
 	// TODO: [p1-task2] jump to kernel to start UCAS-OS
+  j kernel
 
 	/************************************************************/
 	/* Do not touch this comment. Reserved for future projects. */
@@ -38,4 +55,6 @@ stop:
 .data
 
 msg: .string "It's a bootloader...\n\r"
+boot_msg:
+  .string "It's \33[1;34mChuxiao Han\33[0m's bootloader...\n"
 

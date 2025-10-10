@@ -2,6 +2,7 @@
 #include <elf.h>
 #include <errno.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,20 +10,61 @@
 #define IMAGE_FILE "./image"
 #define ARGS "[--extended] [--vm] <bootblock> <executable-file> ..."
 
+#define debug 1
+
 #define SECTOR_SIZE 512
+#define FIXED_APP_SECTORS 15
+#define FIXED_KERNEL_SECTORS 15
+#define MAX_NAME_LEN 32
+#define TASK_MAXNUM 8
 #define BOOT_LOADER_SIG_OFFSET 0x1fe
 #define OS_SIZE_LOC (BOOT_LOADER_SIG_OFFSET - 2)
+#define TASK_NUM_LOC (BOOT_LOADER_SIG_OFFSET - 4)
+#define TASK_INFO_LOC (BOOT_LOADER_SIG_OFFSET - 24 - (TASK_MAXNUM * sizeof(task_info_t)))
+#define BATCH_IO_BUFFER_LOC (BOOT_LOADER_SIG_OFFSET - 8)
+#define IN_BATCH_MODE_LOC (BOOT_LOADER_SIG_OFFSET - 10)
+#define BATCH_TASK_INDEX_LOC (BOOT_LOADER_SIG_OFFSET - 12)
+#define BATCH_TOTAL_TASKS_LOC (BOOT_LOADER_SIG_OFFSET - 14)
+#define BATCH_FILE_START_SECTOR_LOC (TASK_INFO_LOC - 2)
+#define BATCH_FILE_SIZE_SECTORS 2
 #define BOOT_LOADER_SIG_1 0x55
 #define BOOT_LOADER_SIG_2 0xaa
 
 #define NBYTES2SEC(nbytes) (((nbytes) / SECTOR_SIZE) + ((nbytes) % SECTOR_SIZE != 0))
 
+// formatting
+#define ANSI_FG_BLACK "\33[1;30m"
+#define ANSI_FG_RED "\33[1;31m"
+#define ANSI_FG_GREEN "\33[1;32m"
+#define ANSI_FG_YELLOW "\33[1;33m"
+#define ANSI_FG_BLUE "\33[1;34m"
+#define ANSI_FG_MAGENTA "\33[1;35m"
+#define ANSI_FG_CYAN "\33[1;36m"
+#define ANSI_FG_WHITE "\33[1;37m"
+#define ANSI_BG_BLACK "\33[1;40m"
+#define ANSI_BG_RED "\33[1;41m"
+#define ANSI_BG_GREEN "\33[1;42m"
+#define ANSI_BG_YELLOW "\33[1;43m"
+#define ANSI_BG_BLUE "\33[1;44m"
+#define ANSI_BG_MAGENTA "\33[1;45m"
+#define ANSI_BG_CYAN "\33[1;46m"
+#define ANSI_BG_WHITE "\33[1;47m"
+#define ANSI_NONE "\33[0m"
+
+// macro stringizing
+#define str_temp(x) #x
+#define str(x) str_temp(x)
+#define ANSI_FMT(str, fmt) fmt str ANSI_NONE
+
 /* TODO: [p1-task4] design your own task_info_t */
 typedef struct {
-
+    char name[MAX_NAME_LEN];
+    uint16_t start_sector;
+    uint16_t size;
+    uint32_t byte_offset;
+    uint32_t byte_size;
 } task_info_t;
 
-#define TASK_MAXNUM 16
 static task_info_t taskinfo[TASK_MAXNUM];
 
 /* structure to store command line options */
@@ -42,7 +84,7 @@ static uint32_t get_memsz(Elf64_Phdr phdr);
 static void write_segment(Elf64_Phdr phdr, FILE *fp, FILE *img, int *phyaddr);
 static void write_padding(FILE *img, int *phyaddr, int new_phyaddr);
 static void write_img_info(int nbytes_kernel, task_info_t *taskinfo,
-                           short tasknum, FILE *img);
+                           short tasknum, short batch_file_start_sector, FILE *img);
 
 int main(int argc, char **argv)
 {
@@ -81,6 +123,7 @@ static void create_image(int nfiles, char *files[])
 {
     int tasknum = nfiles - 2;
     int nbytes_kernel = 0;
+    int nbytes_application = 0;
     int phyaddr = 0;
     FILE *fp = NULL, *img = NULL;
     Elf64_Ehdr ehdr;
@@ -94,6 +137,8 @@ static void create_image(int nfiles, char *files[])
     for (int fidx = 0; fidx < nfiles; ++fidx) {
 
         int taskidx = fidx - 2;
+        int phyaddr_start_of_file = phyaddr;
+        nbytes_application = 0;
 
         /* open input file */
         fp = fopen(*files, "r");
@@ -118,6 +163,21 @@ static void create_image(int nfiles, char *files[])
             if (strcmp(*files, "main") == 0) {
                 nbytes_kernel += get_filesz(phdr);
             }
+
+            /* update nbytes_application */
+            if (strcmp(*files, "main") != 0 && strcmp(*files, "bootblock") != 0) {
+                nbytes_application += get_filesz(phdr);
+            }
+        }
+
+        // write info into taskinfo[tasknum] struct
+        if (taskidx >= 0) {
+            strncpy(taskinfo[taskidx].name, *files, MAX_NAME_LEN);
+            taskinfo[taskidx].name[MAX_NAME_LEN - 1] = '\0';
+            taskinfo[taskidx].size = NBYTES2SEC(nbytes_application),
+            taskinfo[taskidx].start_sector = phyaddr_start_of_file / SECTOR_SIZE;
+            taskinfo[taskidx].byte_offset = phyaddr_start_of_file;
+            taskinfo[taskidx].byte_size = nbytes_application;
         }
 
         /* write padding bytes */
@@ -127,14 +187,33 @@ static void create_image(int nfiles, char *files[])
          *  occupies the same number of sectors
          * 2. [p1-task4] only padding bootblock is allowed!
          */
+
+        // write paddings for bootblock
         if (strcmp(*files, "bootblock") == 0) {
             write_padding(img, &phyaddr, SECTOR_SIZE);
         }
 
+        // write paddings for kernel
+        // if (strcmp(*files, "main") == 0) {
+        //     write_padding(img, &phyaddr, (1 + FIXED_KERNEL_SECTORS) * SECTOR_SIZE);
+        // }
+ 
+        // write paddings for tasks
+        // if (strcmp(*files, "main") != 0 && strcmp(*files, "bootblock") != 0) {
+        //    write_padding(img, &phyaddr, (1 + FIXED_KERNEL_SECTORS + (taskidx + 1) * FIXED_APP_SECTORS) * SECTOR_SIZE);
+        // }
+
         fclose(fp);
         files++;
     }
-    write_img_info(nbytes_kernel, taskinfo, tasknum, img);
+    // After processing all files, calculate batch_file_start_sector
+    short batch_file_start_sector = phyaddr / SECTOR_SIZE + 1;
+
+    // Reserve space for the batch file
+    write_padding(img, &phyaddr, phyaddr + (BATCH_FILE_SIZE_SECTORS + 1) * SECTOR_SIZE);
+
+    // write_img_info will also take batch_file_start_sector as an argument
+    write_img_info(nbytes_kernel, taskinfo, tasknum, batch_file_start_sector, img);
 
     fclose(img);
 }
@@ -211,10 +290,98 @@ static void write_padding(FILE *img, int *phyaddr, int new_phyaddr)
 }
 
 static void write_img_info(int nbytes_kernel, task_info_t *taskinfo,
-                           short tasknum, FILE * img)
+                           short tasknum, short batch_file_start_sector, FILE *img)
 {
     // TODO: [p1-task3] & [p1-task4] write image info to some certain places
     // NOTE: os size, infomation about app-info sector(s) ...
+
+    // find position for TASK_INFO_LOC
+    fseek(img, TASK_INFO_LOC, SEEK_SET);
+    fwrite(taskinfo, sizeof(task_info_t), tasknum, img);
+
+#if (debug == 1)
+    printf(ANSI_FMT("DEBUG: Writing taskinfo array. tasknum: %d, offset: %lx\n", ANSI_FG_CYAN),
+           tasknum, TASK_INFO_LOC);
+#endif
+
+    for (int i = 0; i < tasknum; ++i) {
+#if (debug == 1)
+        // Added two spaces indentation for better readability of the list
+        printf(ANSI_FMT("DEBUG:\n\r\tTask %d: Name='%s',\n\r\tStart Sector=%u, Size=%u,\n\r\tByte Offset=%x, Byte Size=%x\n", ANSI_FG_GREEN),
+               i, taskinfo[i].name,
+               taskinfo[i].start_sector, taskinfo[i].size, taskinfo[i].byte_offset, taskinfo[i].byte_size);
+#endif
+    }
+
+    // find position for TASK_NUM_LOC
+    fseek(img, TASK_NUM_LOC, SEEK_SET);
+    fwrite(&tasknum, sizeof(short), 1, img);
+
+#if (debug == 1)
+    printf(ANSI_FMT("DEBUG: Writing tasknum: %d to offset %x\n", ANSI_FG_CYAN),
+           tasknum, TASK_NUM_LOC);
+#endif
+
+    // calc os_size, and find position for OS_SIZE_LOC
+    short os_size = NBYTES2SEC(nbytes_kernel);
+    fseek(img, OS_SIZE_LOC, SEEK_SET);
+    fwrite(&os_size, sizeof(short), 1, img);
+
+#if (debug == 1)
+    printf(ANSI_FMT("DEBUG: Writing os_size: %d to offset %x (nbytes_kernel: %d)\n", ANSI_FG_CYAN),
+           os_size, OS_SIZE_LOC, nbytes_kernel);
+#endif
+
+    // Write BATCH_FILE_START_SECTOR
+    fseek(img, BATCH_FILE_START_SECTOR_LOC, SEEK_SET);
+    fwrite(&batch_file_start_sector, sizeof(short), 1, img);
+
+#if (debug == 1)
+    printf(ANSI_FMT("DEBUG: Writing batch_file_start_sector: %d to offset %lx\n", ANSI_FG_CYAN),
+           batch_file_start_sector, BATCH_FILE_START_SECTOR_LOC);
+#endif
+    // --- Initialize Batch State Variables to Zero ---
+    // This ensures that the OS starts in a non-batch mode with a clean slate.
+    short zero_short = 0;
+    uint32_t zero_word = 0; // Changed from uint64_t to uint32_t
+
+    // Initialize BATCH_TOTAL_TASKS_LOC to 0
+    // This variable will store the number of tasks in a batch.
+    fseek(img, BATCH_TOTAL_TASKS_LOC, SEEK_SET);
+    fwrite(&zero_short, sizeof(short), 1, img);
+#if (debug == 1)
+    printf(ANSI_FMT("DEBUG: Initializing BATCH_TOTAL_TASKS_LOC to 0 at offset %lx\n", ANSI_FG_CYAN),
+           (long)BATCH_TOTAL_TASKS_LOC);
+#endif
+
+    // Initialize BATCH_CURRENT_TASK_IDX_LOC to 0
+    // This will be a pointer/index to the currently executing task in the batch.
+    fseek(img, BATCH_TASK_INDEX_LOC, SEEK_SET);
+    fwrite(&zero_short, sizeof(short), 1, img);
+#if (debug == 1)
+    printf(ANSI_FMT("DEBUG: Initializing BATCH_CURRENT_TASK_IDX_LOC to 0 at offset %lx\n", ANSI_FG_CYAN),
+           (long)BATCH_TASK_INDEX_LOC);
+#endif
+
+    // Initialize IN_BATCH_MODE_LOC to 0 (false)
+    // This flag indicates whether the OS is currently executing a batch.
+    fseek(img, IN_BATCH_MODE_LOC, SEEK_SET);
+    fwrite(&zero_short, sizeof(short), 1, img); // Using a short to represent a boolean (0 or 1)
+#if (debug == 1)
+    printf(ANSI_FMT("DEBUG: Initializing IN_BATCH_MODE_LOC to 0 at offset %lx\n", ANSI_FG_CYAN),
+           (long)IN_BATCH_MODE_LOC);
+#endif
+
+    // Initialize BATCH_IO_BUFFER_LOC to 0
+    // This buffer is likely used for inter-task communication or storing return values.
+    fseek(img, BATCH_IO_BUFFER_LOC, SEEK_SET);
+    // Write a 4-byte (32-bit) zero value
+    fwrite(&zero_word, sizeof(uint32_t), 1, img);
+#if (debug == 1)
+    printf(ANSI_FMT("DEBUG: Initializing BATCH_IO_BUFFER_LOC to 0 at offset %lx\n", ANSI_FG_CYAN),
+           (long)BATCH_IO_BUFFER_LOC);
+#endif
+
 }
 
 /* print an error message and exit */

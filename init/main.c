@@ -1,3 +1,4 @@
+#include "aesthetic.h"
 #include <common.h>
 #include <asm.h>
 #include <os/kernel.h>
@@ -5,6 +6,7 @@
 #include <os/string.h>
 #include <os/loader.h>
 #include <type.h>
+#include <cmd.h>
 
 #define VERSION_BUF 50
 
@@ -13,6 +15,10 @@ char buf[VERSION_BUF];
 
 // Task info array
 task_info_t tasks[TASK_MAXNUM];
+int tasknum;
+int g_batch_file_start_sector;
+// Global buffer for passing I/O between batch tasks
+uint64_t batch_io_buffer_val;
 
 static int bss_check(void)
 {
@@ -34,12 +40,116 @@ static void init_jmptab(void)
     jmptab[CONSOLE_PUTCHAR] = (long (*)())port_write_ch;
     jmptab[CONSOLE_GETCHAR] = (long (*)())port_read_ch;
     jmptab[SD_READ]         = (long (*)())sd_read;
+    jmptab[SD_WRITE]         = (long (*)())sd_write;
 }
 
 static void init_task_info(void)
 {
     // TODO: [p1-task4] Init 'tasks' array via reading app-info sector
     // NOTE: You need to get some related arguments from bootblock first
+    int tasknum = *(uint16_t *)TASK_NUM_LOC;
+
+    for (int i = 0; i < tasknum; i++) {
+        // Read the task information from the specified memory location
+        tasks[i] = *(task_info_t *)(TASK_INFO_LOC + i * sizeof(task_info_t));
+
+        // Conditional debug output block
+        if (DEBUG == 1) {
+            // Set the text color to green
+            bios_putstr(ANSI_FG_GREEN);
+
+            // Print the debug message in parts
+            bios_putstr("DEBUG: task detected, '");
+            bios_putstr(tasks[i].name);
+            bios_putstr("'\n\r");
+
+            // Reset the color back to default
+            bios_putstr(ANSI_NONE);
+        }
+
+    }
+}
+
+/**
+ * @brief Returns task index in the task array based on task name.
+ */
+int search_task_name(int tasknum, char name[]) {
+    for (int i = 0; i < tasknum; i++) {
+        if (strcmp(name, tasks[i].name) == 0)
+            return i;
+    }
+    return -1;
+}
+
+/**
+ * @brief Launch a task based on task index (obsolete).
+ */
+uint64_t user_input_and_launch_task_handler(int tasknum) {
+    // Prompt the user to input the task that he want to execute
+    bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE));
+    bios_putstr(ANSI_FMT("Please enter the task to execute: \n", ANSI_FG_YELLOW));
+    bios_putstr(ANSI_FMT("~> ", ANSI_FG_CYAN));
+
+
+    // Use BIOS API to read characters from console and echoes back ( •̀ ω •́ )✧)
+    int task_idx = 0;
+    char temp_task_idx_buf[] = "_____";
+    char temp_task_name_buf[32];
+    int task_name_buf_ptr = 0;
+    char *exec_task_idx_buf;
+    while (1) {
+        char input = bios_getchar();
+        if (input == '\n' || input == '\r') {
+            bios_putchar('\n');
+            bios_putchar('\r');
+            temp_task_name_buf[task_name_buf_ptr] = '\0';
+            int task_idx_by_name = search_task_name(tasknum, temp_task_name_buf);
+            if (task_idx_by_name != -1) {
+                task_idx = task_idx_by_name;
+                exec_task_idx_buf = itoa(task_idx, temp_task_idx_buf, 10);
+                break;
+            } else if (task_idx >= tasknum || task_idx < 0) {
+                // Prompt the user to input the task that he want to execute
+                bios_putstr(ANSI_FMT("ERROR: Invalid task index or name", ANSI_BG_RED));
+                bios_putstr(ANSI_FMT("\n\rInfo: ", ANSI_FG_BLUE));
+                bios_putstr(ANSI_FMT("Please enter the task to execute: \n", ANSI_FG_YELLOW));
+                bios_putstr(ANSI_FMT("~> ", ANSI_FG_CYAN));
+
+                // reset index and name buf pointer
+                task_idx = 0;
+                task_name_buf_ptr = 0;
+                continue;
+            } else {
+                exec_task_idx_buf = itoa(task_idx, temp_task_idx_buf, 10);
+                break;
+            }
+        }
+        if (input != 0xFF) {
+            task_idx *= 10;
+            task_idx += input - '0';
+            temp_task_name_buf[task_name_buf_ptr++] = input;
+            bios_putchar(input);
+        }
+    }
+
+    // Print success message
+    bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE) ANSI_FMT("Now executing task ", ANSI_FG_GREEN));
+    bios_putstr(ANSI_FG_CYAN);
+    bios_putstr(exec_task_idx_buf);
+    bios_putstr(", ");
+    bios_putstr(tasks[task_idx].name);
+    bios_putstr(ANSI_NONE);
+    bios_putstr(ANSI_FMT("\n", ANSI_FG_GREEN));
+
+    // Print success message
+    bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE) ANSI_FMT("Windows is loading files...\n\r", ANSI_FG_GREEN));
+    uint64_t entry_point = load_task_img(tasks[task_idx].name, tasknum);
+
+    // enter the entry point
+    bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE) ANSI_FMT("Starting task...\n\r", ANSI_FG_GREEN));
+    ((void (*)(void))entry_point)();
+
+    return 0;
 }
 
 /************************************************************/
@@ -73,11 +183,43 @@ int main(void)
         }
     }
 
+    // Print Welcome message
+    bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE));
     bios_putstr("Hello OS!\n\r");
+    bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE));
     bios_putstr(buf);
 
     // TODO: Load tasks by either task id [p1-task3] or task name [p1-task4],
     //   and then execute them.
+
+    // Load the global tasknum from ram
+    tasknum = *((short *)TASK_NUM_LOC);
+
+    // Batch mode check and handler
+    bool in_batch_mode = *(bool *)(IN_BATCH_MODE_LOC);
+    int batch_task_index = *(short *)(BATCH_TASK_INDEX_LOC);
+    int batch_total_tasks = *(short *)(BATCH_TOTAL_TASKS_LOC);
+    batch_io_buffer_val = *(uint32_t *)(BATCH_IO_BUFFER_LOC);
+    g_batch_file_start_sector = *(short *)(BATCH_FILE_START_SECTOR_LOC); // tell cmd_write_batch where to write
+    kernel_batch_handler(in_batch_mode, batch_task_index, batch_total_tasks, batch_io_buffer_val);
+
+    // Construct the message with color
+    char temp_buf[] = "_____";
+    char *tasknum_buf = itoa(tasknum, temp_buf, 10);
+    bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE) ANSI_FMT("Loaded ", ANSI_FG_GREEN));
+    bios_putstr(ANSI_FG_CYAN);
+    bios_putstr(tasknum_buf);
+    bios_putstr(ANSI_NONE);
+    bios_putstr(ANSI_FMT(" tasks.\n", ANSI_FG_GREEN));
+
+    // Print logo on startup
+    if (*(short *)(LOGO_HAS_PRINTED) == 0) {
+        print_logo();
+        *(short *)(LOGO_HAS_PRINTED) = 1;
+    }
+
+    // Run main command parsing and executing loop
+    run_command_loop();
 
     // Infinite while loop, where CPU stays in a low-power state (QAQQQQQQQQQQQ)
     while (1)
