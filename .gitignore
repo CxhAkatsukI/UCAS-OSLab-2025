@@ -1,5 +1,5 @@
 build/
 .cache/
-./createimage
+createimage
 .asm-lsp.toml
 compile_commands.json

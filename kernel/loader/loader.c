@@ -85,5 +85,9 @@ uint64_t load_task_img(char *name, int tasknum)
         bios_putstr(ANSI_NONE);
     }
 
+    // FENCE.I ensures that the instruction fetch pipeline sees the
+    // recently written data (our new code).
+    asm volatile ("fence.i" ::: "memory");
+
     return TASK_MEM_BASE;
 }

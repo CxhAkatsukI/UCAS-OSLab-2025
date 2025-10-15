@@ -146,7 +146,11 @@ uint64_t user_input_and_launch_task_handler(int tasknum) {
     uint64_t entry_point = load_task_img(tasks[task_idx].name, tasknum);
 
     // enter the entry point
-    bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE) ANSI_FMT("Starting task...\n\r", ANSI_FG_GREEN));
+    char *temp_index_buf = "____________";
+    bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE) ANSI_FMT("Starting task at entry point", ANSI_FG_GREEN));
+    bios_putstr(ANSI_FG_CYAN);
+    bios_putstr(itoa(entry_point, temp_index_buf, 16));
+    bios_putstr(ANSI_NONE);
     ((void (*)(void))entry_point)();
 
     return 0;

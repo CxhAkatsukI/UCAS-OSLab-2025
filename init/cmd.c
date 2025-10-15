@@ -81,6 +81,79 @@ static int read_line(char *buffer, int max_len) {
 }
 
 /**
+ * @brief Parses a hexadecimal string into a uint64_t.
+ * Handles "0x" prefix.
+ * @param s The string to parse.
+ * @return The parsed uint64_t value.
+ */
+static uint64_t parse_hex(char *s) {
+    uint64_t res = 0;
+    if (s == NULL) return 0;
+
+    // Skip "0x" prefix if present
+    if (strlen(s) > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        s += 2;
+    }
+
+    while (*s != '\0') {
+        res <<= 4; // Shift left by 4 bits for the next hex digit
+        if (*s >= '0' && *s <= '9') {
+            res |= (*s - '0');
+        } else if (*s >= 'a' && *s <= 'f') {
+            res |= (*s - 'a' + 10);
+        } else if (*s >= 'A' && *s <= 'F') {
+            res |= (*s - 'A' + 10);
+        } else {
+            // Invalid hex character, stop parsing
+            break;
+        }
+        s++;
+    }
+    return res;
+}
+
+/**
+ * @brief Prints a hexadecimal dump of a memory region.
+ * @param addr The starting address of the memory region.
+ * @param len The number of bytes to dump.
+ * @param display_addr The address to display (can be different from addr if it's a virtual address).
+ */
+static void print_hex_dump(uint64_t addr, int len, uint64_t display_addr) {
+    const int bytes_per_line = 16;
+    char hex_buf[3]; // For two hex digits + null terminator
+    char ascii_buf[bytes_per_line + 1]; // For ASCII chars + null terminator
+
+    for (int i = 0; i < len; i += bytes_per_line) {
+        // Print address
+        bios_putstr(ANSI_FMT("0x", ANSI_FG_YELLOW));
+        bios_putstr(itoa(display_addr + i, hex_buf, 16));
+        bios_putstr(": ");
+
+        // Print hex bytes
+        for (int j = 0; j < bytes_per_line; j++) {
+            if (i + j < len) {
+                unsigned char byte = *((unsigned char *)(addr + i + j));
+                bios_putstr(itoa(byte, hex_buf, 16));
+                if (byte < 0x10) { // Pad with leading zero if necessary
+                    bios_putstr("0");
+                }
+                ascii_buf[j] = (byte >= 32 && byte <= 126) ? byte : '.'; // Printable ASCII or '.'
+            } else {
+                bios_putstr("  "); // Pad with spaces if end of dump
+                ascii_buf[j] = ' ';
+            }
+            bios_putstr(" ");
+        }
+        ascii_buf[bytes_per_line] = '\0'; // Null-terminate ASCII buffer
+
+        // Print ASCII representation
+        bios_putstr("  |");
+        bios_putstr(ascii_buf);
+        bios_putstr("|\n\r");
+    }
+}
+
+/**
  * @brief Runs the main interactive command shell loop.
  */
 void run_command_loop() {
@@ -202,8 +275,13 @@ int cmd_exec(char *args) {
 
         uint64_t entry_point = load_task_img(tasks[selected_task_idx].name, tasknum);
 
-        bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE));
-        bios_putstr(ANSI_FMT("Starting task...\n\r", ANSI_FG_GREEN));
+        // enter the entry point
+        char *temp_index_buf = "____________";
+        bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE) ANSI_FMT("Starting task at entry point ", ANSI_FG_GREEN));
+        bios_putstr(ANSI_FG_CYAN);
+        bios_putstr(itoa(entry_point, temp_index_buf, 16));
+        bios_putstr(ANSI_NONE);
+        bios_putstr("\n\r");
 
         ((void (*)(void))entry_point)();
 
