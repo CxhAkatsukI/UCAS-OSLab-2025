@@ -108,6 +108,10 @@ void do_sleep(uint32_t);
 void do_block(list_node_t *, list_head *queue);
 void do_unblock(list_node_t *);
 
+void init_pcb_stack(
+    ptr_t kernel_stack, ptr_t user_stack, ptr_t entry_point,
+    pcb_t *pcb);
+
 /************************************************************/
 /* Do not touch this comment. Reserved for future projects. */
 /************************************************************/

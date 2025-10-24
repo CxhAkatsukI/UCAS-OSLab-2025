@@ -19,7 +19,7 @@ ENTRY(_start)
     addi a0, a0, 4
     blt a0, a1, clear_bss_loop_start
 
-    li sp, USER_STACKPTR
+    // li sp, USER_STACKPTR
 
     /* TODO: [p1-task3] enter main function */
 

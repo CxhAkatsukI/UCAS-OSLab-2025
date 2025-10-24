@@ -1,14 +1,14 @@
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
- * * * * * * * * * * * * Copyright (C) 2018 Institute of Computing
+ * * * * * * * * * * * Copyright (C) 2018 Institute of Computing
  * Technology, CAS Author : Han Shukai (email :
  * hanshukai@ict.ac.cn)
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
- * * * * * * * * * * * * Changelog: 2019-8 Reimplement queue.h.
+ * * * * * * * * * * * Changelog: 2019-8 Reimplement queue.h.
  * Provide Linux-style doube-linked list instead of original
  * unextendable Queue implementation. Luming
  * Wang(wangluming@ict.ac.cn)
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
- * * * * * * * * * * * *
+ * * * * * * * * * * * 
  *
  * Permission is hereby granted, free of charge, to any person
  * obtaining a copy of this software and associated documentation
@@ -32,7 +32,7 @@
  * OTHER DEALINGS IN THE SOFTWARE.
  *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
- * * * * * * * * * * * */
+ * * * * * * * * * * */
 
 #ifndef INCLUDE_LIST_H_
 #define INCLUDE_LIST_H_
@@ -51,5 +51,19 @@ typedef list_node_t list_head;
 #define LIST_HEAD(name) struct list_node name = {&(name), &(name)}
 
 /* TODO: [p2-task1] implement your own list API */
+
+// Get the struct for this entry
+#define list_entry(ptr, type, member) \
+    ((type *)((char *)(ptr) - (unsigned long)(&((type *)0)->member)))
+
+void list_init(list_node_t *list);
+void list_add(list_node_t *new, list_node_t *head);
+void list_add_tail(list_node_t *new, list_node_t *head);
+void list_del(list_node_t *entry);
+
+static inline int list_is_empty(const list_head *head)
+{
+    return head->next == head;
+}
 
 #endif

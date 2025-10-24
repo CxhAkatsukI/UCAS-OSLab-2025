@@ -25,7 +25,7 @@
 #define INCLUDE_COMMON_H_
 
 #include <type.h>
-#define DEBUG 1
+#define DEBUG 0
 
 #define REG_DAT     0x00
 #define REG_IER     0x01

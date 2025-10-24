@@ -1,4 +1,5 @@
 #include "aesthetic.h"
+#include "os/list.h"
 #include <common.h>
 #include <asm.h>
 #include <asm/unistd.h>
@@ -28,18 +29,6 @@ int g_batch_file_start_sector;
 // Global buffer for passing I/O between batch tasks
 uint64_t batch_io_buffer_val;
 
-static int bss_check(void)
-{
-    for (int i = 0; i < VERSION_BUF; ++i)
-    {
-        if (buf[i] != 0)
-        {
-            return 0;
-        }
-    }
-    return 1;
-}
-
 static void init_jmptab(void)
 {
     volatile long (*(*jmptab))() = (volatile long (*(*))())KERNEL_JMPTAB_BASE;
@@ -60,6 +49,7 @@ static void init_jmptab(void)
     jmptab[MUTEX_RELEASE]   = (long (*)())do_mutex_lock_release;
 
     // TODO: [p2-task1] (S-core) initialize system call table.
+    jmptab[REFLUSH]         = (long (*)())screen_reflush;
 
 }
 
@@ -163,7 +153,7 @@ uint64_t user_input_and_launch_task_handler(int tasknum) {
 
     // Print success message
     bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE) ANSI_FMT("Windows is loading files...\n\r", ANSI_FG_GREEN));
-    uint64_t entry_point = load_task_img(tasks[task_idx].name, tasknum);
+    uint64_t entry_point = load_task_img(tasks[task_idx].name, tasknum, (ptr_t)TASK_MEM_BASE);
 
     // enter the entry point
     char *temp_index_buf = "____________";
@@ -177,18 +167,16 @@ uint64_t user_input_and_launch_task_handler(int tasknum) {
 }
 
 /************************************************************/
-static void init_pcb_stack(
+void init_pcb_stack(
     ptr_t kernel_stack, ptr_t user_stack, ptr_t entry_point,
     pcb_t *pcb)
 {
-     /* TODO: [p2-task3] initialization of registers on kernel stack
-      * HINT: sp, ra, sepc, sstatus
-      * NOTE: To run the task in user mode, you should set corresponding bits
-      *     of sstatus(SPP, SPIE, etc.).
-      */
-    regs_context_t *pt_regs =
-        (regs_context_t *)(kernel_stack - sizeof(regs_context_t));
-
+    /* TODO: [p2-task3] initialization of registers on kernel stack
+     * HINT: sp, ra, sepc, sstatus
+     * NOTE: To run the task in user mode, you should set corresponding bits
+     *     of sstatus(SPP, SPIE, etc.).
+     */
+    regs_context_t *pt_regs = (regs_context_t *)(kernel_stack - sizeof(regs_context_t));
 
     /* TODO: [p2-task1] set sp to simulate just returning from switch_to
      * NOTE: you should prepare a stack, and push some values to
@@ -196,16 +184,53 @@ static void init_pcb_stack(
      */
     switchto_context_t *pt_switchto =
         (switchto_context_t *)((ptr_t)pt_regs - sizeof(switchto_context_t));
+    
+    // Set the `ra` (return address) register in our fake context to the task's entry point.
+    pt_switchto->regs[0] = entry_point; // ra
 
+    // Set the `sp` (stack pointer) for the new task.
+    // The stack pointer should point to the base of our fake context.
+    pt_switchto->regs[1] = (reg_t)pt_switchto; // sp
+
+    // Update the PCB's kernel_sp to point to this fake context.
+    pcb->kernel_sp = (reg_t)pt_switchto;
+    pcb->user_sp = user_stack;
 }
 
 static void init_pcb(void)
 {
     /* TODO: [p2-task1] load needed tasks and init their corresponding PCB */
+    ptr_t next_task_addr = TASK_MEM_BASE;
+    tasknum = *(short *)TASK_NUM_LOC; // Ensure tasknum is loaded
 
+    for (int i = 0; i < tasknum; i++) {
+        // Load the task into memory at the next available address
+        ptr_t entry_point = load_task_img(tasks[i].name, tasknum, next_task_addr);
+        
+        // Get a free PCB
+        pcb_t *new_pcb = &pcb[process_id];
+
+        // Initialize the PCB
+        new_pcb->kernel_sp = allocKernelPage(1);
+        new_pcb->user_sp = allocUserPage(1);
+        new_pcb->pid = process_id++;
+        new_pcb->status = TASK_READY;
+        new_pcb->cursor_x = 0;
+        new_pcb->cursor_y = i; // Give each task its own line to start
+
+        // Initialize the stack for the first run
+        init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, new_pcb);
+
+        // Add the PCB to the ready queue
+        list_add_tail(&new_pcb->list, &ready_queue);
+
+        // Update the next available task address, page-aligned
+        next_task_addr += tasks[i].byte_size;
+        next_task_addr = (next_task_addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    }
 
     /* TODO: [p2-task1] remember to initialize 'current_running' */
-
+    current_running = &pid0_pcb;
 }
 
 static void init_syscall(void)
@@ -222,27 +247,10 @@ int main(void)
     // Init task information (〃'▽'〃)
     init_task_info();
 
-    // Output 'Hello OS!', bss check result and OS version
-    char output_str[] = "bss check: _ version: _\n\r";
-    char output_val[2] = {0};
-    int i, output_val_pos = 0;
-
-    output_val[0] = check ? 't' : 'f';
-    output_val[1] = version + '0';
-    for (i = 0; i < sizeof(output_str); ++i)
-    {
-        buf[i] = output_str[i];
-        if (buf[i] == '_')
-        {
-            buf[i] = output_val[output_val_pos++];
-        }
-    }
-
     // Print Welcome message
     bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE));
     bios_putstr("Hello OS!\n\r");
     bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE));
-    bios_putstr(buf);
 
     // Init Process Control Blocks |•'-'•) ✧
     init_pcb();

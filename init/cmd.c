@@ -1,3 +1,7 @@
+#include "os/list.h"
+#include "os/sched.h"
+#include "screen.h"
+#include <os/mm.h>
 #include <common.h>
 #include <asm.h>
 #include <os/kernel.h>
@@ -23,7 +27,8 @@ command_t cmd_table[] = {
     {"ls", "List all loaded applications", cmd_ls},
     {"exec", "Execute a task by name or ID", cmd_exec},
     {"write_batch", "Write a batch processing sequence to image", cmd_write_batch},
-    {"exec_batch", "Execute the stored batch processing sequence", cmd_exec_batch}
+    {"exec_batch", "Execute the stored batch processing sequence", cmd_exec_batch},
+    {"wrq", "(W)rite programs into (r)eady (q)ueue.", cmd_wrq}
 };
 
 /**
@@ -273,7 +278,7 @@ int cmd_exec(char *args) {
         bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE));
         bios_putstr(ANSI_FMT("Windows is loading files...\n\r", ANSI_FG_GREEN));
 
-        uint64_t entry_point = load_task_img(tasks[selected_task_idx].name, tasknum);
+        uint64_t entry_point = load_task_img(tasks[selected_task_idx].name, tasknum, (ptr_t)TASK_MEM_BASE);
 
         // enter the entry point
         char *temp_index_buf = "____________";
@@ -646,4 +651,86 @@ end_batch_mode_check:
     // This label is a jump target to allow the function to gracefully exit
     // batch mode on error and continue to the regular shell prompt.
     return;
+}
+
+/**
+ * @brief Command handler to write multiple programs into the ready queue.
+ *
+ * This command initializes PCBs for each specified task and adds them
+ * to the ready queue for scheduling.
+ *
+ * @param args A space-separated string of task names to load into the ready queue.
+ * @return Always returns 0.
+ */
+int cmd_wrq(char *args) {
+    // Check for empty arguments
+    if (args == NULL || *args == '\0') {
+        bios_putstr(ANSI_FMT("ERROR: Usage: wrq <task_name1> <task_name2> ...", ANSI_BG_RED));
+        bios_putstr(ANSI_FMT("\n\r", ANSI_NONE)); // Newline and reset color.
+        return 0;
+    }
+
+    // --- Tokenize the input arguments into individual task names ---
+    char parsed_names[MAX_BATCH_TASKS][MAX_NAME_LEN];
+    int num_parsed_tasks = tokenize_string(args, parsed_names, MAX_BATCH_TASKS);
+
+    if (num_parsed_tasks <= 0) {
+        bios_putstr(ANSI_FMT("ERROR: No tasks provided for demo.", ANSI_BG_RED));
+        bios_putstr(ANSI_FMT("\n\r", ANSI_NONE));
+        return 0;
+    }
+
+    // --- Initialize PCBs and add them to the ready_queue ---
+    list_init(&ready_queue); // the list initialized in main.c shall be invalidated
+    ptr_t next_task_addr = TASK_MEM_BASE;
+    for (int i = 0; i < num_parsed_tasks; ++i) {
+        int task_idx = search_task_name(tasknum, parsed_names[i]);
+        if (task_idx == -1) {
+            bios_putstr(ANSI_FMT("ERROR: Invalid task name in arguments: ", ANSI_BG_RED));
+            bios_putstr(parsed_names[i]);
+            bios_putstr(ANSI_FMT("\n\r", ANSI_NONE));
+            return 0; // Abort
+        }
+
+        // Get a free PCB
+        pcb_t *new_pcb = &pcb[process_id];
+
+        // Load the task into memory
+        ptr_t entry_point = load_task_img(tasks[task_idx].name, tasknum, next_task_addr);
+
+        // Initialize the PCB
+        new_pcb->kernel_sp = allocKernelPage(1);
+        new_pcb->user_sp = allocUserPage(1);
+        new_pcb->pid = process_id++;
+        new_pcb->status = TASK_READY;
+        new_pcb->cursor_x = 0;
+        new_pcb->cursor_y = i; // Give each task its own line
+
+        // Initialize the fake context on the stack
+        init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, new_pcb);
+
+        // Add the initialized PCB to the ready queue
+        list_add_tail(&new_pcb->list, &ready_queue);
+
+        // Update the next available task address, page-aligned
+        next_task_addr += tasks[task_idx].byte_size;
+        next_task_addr = (next_task_addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    }
+    
+    bios_putstr(ANSI_FMT("Info: Starting scheduler...\n\r", ANSI_FG_GREEN));
+
+    // Enough newlines to clear the screen
+    // (don't know how to utilize screen_clear and screen_reflush API)
+    bios_putstr("\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r");
+    bios_putstr("\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r");
+    bios_putstr("\n\r\n\r\n\r");
+    screen_clear();
+    screen_reflush();
+
+    // --- do_scheduler takes over control ---
+    while (1) {
+        do_scheduler();
+    }
+
+    return 0;
 }

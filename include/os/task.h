@@ -4,10 +4,10 @@
 #include <type.h>
 
 #define TASK_MEM_BASE    0x52000000
-#define TASK_MAXNUM      8
+#define TASK_MAXNUM      16
 #define TASK_SIZE        0x10000
 #define USER_STACKPTR    (TASK_MEM_BASE + TASK_SIZE)
-#define MAX_NAME_LEN     32
+#define MAX_NAME_LEN     8
 #define MAX_INPUT_LEN    128
 #define BOOT_LOADER_SIG_OFFSET (0x1fe + 0x50200000)
 #define OS_SIZE_LOC (BOOT_LOADER_SIG_OFFSET - 2)

@@ -31,7 +31,7 @@ static inline void bios_puthex_byte(uint8_t byte)
  * @param tasknum   The total number of available tasks.
  * @return uint64_t The entry point of the loaded task (always TASK_MEM_BASE).
  */
-uint64_t load_task_img(char *name, int tasknum)
+uint64_t load_task_img(char *name, int tasknum, ptr_t dest_addr)
 {
     /**
      * TODO:
@@ -44,7 +44,7 @@ uint64_t load_task_img(char *name, int tasknum)
     task_info_t *task = &tasks[task_idx];
     sd_read((uintptr_t)temp_load_buffer, task->size + 1, task->start_sector);
     uint32_t offset_in_buffer = task->byte_offset % SECTOR_SIZE;
-    memcpy((void *)TASK_MEM_BASE, (void *)temp_load_buffer + offset_in_buffer, task->byte_size);
+    memcpy((void *)dest_addr, (void *)temp_load_buffer + offset_in_buffer, task->byte_size);
 
     // Conditional debug output block
     if (DEBUG == 1) {
@@ -57,7 +57,7 @@ uint64_t load_task_img(char *name, int tasknum)
 
         // Determine how many bytes to print (up to a max of 16 for a brief summary)
         int bytes_to_print = (task->byte_size > 16) ? 16 : task->byte_size;
-        uint8_t *mem_ptr = (uint8_t *)TASK_MEM_BASE;
+        uint8_t *mem_ptr = (uint8_t *)dest_addr;
 
         // Loop through the bytes and print each one in hex
         for (int i = 0; i < bytes_to_print; i++) {
@@ -70,7 +70,7 @@ uint64_t load_task_img(char *name, int tasknum)
             bios_putstr("\n\r  Last bytes in memory:\n\r  ");
 
             // Point to the start of the last 16 bytes
-            uint8_t *last_mem_ptr = (uint8_t *)TASK_MEM_BASE + task->byte_size - 16;
+            uint8_t *last_mem_ptr = (uint8_t *)dest_addr + task->byte_size - 16;
 
             // Loop through the last 16 bytes and print each one in hex
             for (int i = 0; i < 16; i++) {
@@ -89,5 +89,5 @@ uint64_t load_task_img(char *name, int tasknum)
     // recently written data (our new code).
     asm volatile ("fence.i" ::: "memory");
 
-    return TASK_MEM_BASE;
+    return dest_addr;
 }

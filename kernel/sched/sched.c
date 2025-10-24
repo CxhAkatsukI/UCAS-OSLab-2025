@@ -29,11 +29,29 @@ void do_scheduler(void)
     /* Do not touch this comment. Reserved for future projects. */
     /************************************************************/
 
-    // TODO: [p2-task1] Modify the current_running pointer.
+    // [p2-task1] Modify the current_running pointer.
+    pcb_t *prev_running = current_running;
+    pcb_t *next_running;
 
+    if (prev_running->status == TASK_RUNNING) {
+        prev_running->status = TASK_READY;
+        list_add_tail(&prev_running->list, &ready_queue);
+    }
 
-    // TODO: [p2-task1] switch_to current_running
+    if (!list_is_empty(&ready_queue)) {
+        // Dequeue the next task from the ready queue
+        next_running = list_entry(ready_queue.next, pcb_t, list);
+        list_del(ready_queue.next);
+    } else {
+        // If the ready queue is empty, schedule the idle process
+        next_running = &pid0_pcb;
+    }
 
+    current_running = next_running;
+    current_running->status = TASK_RUNNING;
+
+    // [p2-task1] switch_to current_running
+    switch_to(prev_running, current_running);
 }
 
 void do_sleep(uint32_t sleep_time)
@@ -48,9 +66,27 @@ void do_sleep(uint32_t sleep_time)
 void do_block(list_node_t *pcb_node, list_head *queue)
 {
     // TODO: [p2-task2] block the pcb task into the block queue
+
+    // queue shall be the blocked queue
+    pcb_t *pcb = list_entry(pcb_node, pcb_t, list);
+    pcb->status = TASK_BLOCKED;
+    list_add_tail(pcb_node, queue);
+
+    // call the scheduler to run a different task
+    do_scheduler();
 }
 
 void do_unblock(list_node_t *pcb_node)
 {
     // TODO: [p2-task2] unblock the `pcb` from the block queue
+
+    // set the pcb's status to TASK_READY
+    pcb_t *pcb = list_entry(pcb_node, pcb_t, list);
+    pcb->status = TASK_READY;
+ 
+    // delete the `pcb` from the block queue
+    list_del(pcb_node);
+
+    // Append the pcb node to the ready_queue
+    list_add_tail(pcb_node, &ready_queue);
 }
