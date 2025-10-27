@@ -20,6 +20,9 @@
 #include <cmd.h>
 #include <csr.h>
 
+#define KERNEL_STACK_PAGES 4
+#define USER_STACK_PAGES 1
+
 extern void ret_from_exception();
 
 // Task info array
@@ -176,7 +179,23 @@ void init_pcb_stack(
      * NOTE: To run the task in user mode, you should set corresponding bits
      *     of sstatus(SPP, SPIE, etc.).
      */
+
     regs_context_t *pt_regs = (regs_context_t *)(kernel_stack - sizeof(regs_context_t));
+
+    // Initialize all registers to 0
+    for (int i = 0; i < 32; i++) {
+        pt_regs->regs[i] = 0;
+    }
+
+    // Initialize ra and sp
+    pt_regs->regs[1] = 0; // ra
+    pt_regs->regs[2] = user_stack; // sp
+
+    // Initialie `sstatus`, `SPP` field is now 0; `SPIE` field is now 1
+    pt_regs->sstatus = SR_SPIE;
+
+    // Initialize `sepc` to the entry point
+    pt_regs->sepc = entry_point;
 
     /* TODO: [p2-task1] set sp to simulate just returning from switch_to
      * NOTE: you should prepare a stack, and push some values to
@@ -184,9 +203,9 @@ void init_pcb_stack(
      */
     switchto_context_t *pt_switchto =
         (switchto_context_t *)((ptr_t)pt_regs - sizeof(switchto_context_t));
-    
+
     // Set the `ra` (return address) register in our fake context to the task's entry point.
-    pt_switchto->regs[0] = entry_point; // ra
+    pt_switchto->regs[0] = (reg_t)&ret_from_exception; // ra
 
     // Set the `sp` (stack pointer) for the new task.
     // The stack pointer should point to the base of our fake context.
@@ -199,35 +218,35 @@ void init_pcb_stack(
 
 static void init_pcb(void)
 {
-    /* TODO: [p2-task1] load needed tasks and init their corresponding PCB */
-    ptr_t next_task_addr = TASK_MEM_BASE;
-    tasknum = *(short *)TASK_NUM_LOC; // Ensure tasknum is loaded
+    // /* TODO: [p2-task1] load needed tasks and init their corresponding PCB */
+    // ptr_t next_task_addr = TASK_MEM_BASE;
+    // tasknum = *(short *)TASK_NUM_LOC; // Ensure tasknum is loaded
 
-    for (int i = 0; i < tasknum; i++) {
-        // Load the task into memory at the next available address
-        ptr_t entry_point = load_task_img(tasks[i].name, tasknum, next_task_addr);
+    // for (int i = 0; i < tasknum; i++) {
+    //     // Load the task into memory at the next available address
+    //     ptr_t entry_point = load_task_img(tasks[i].name, tasknum, next_task_addr);
         
-        // Get a free PCB
-        pcb_t *new_pcb = &pcb[process_id];
+    //     // Get a free PCB
+    //     pcb_t *new_pcb = &pcb[process_id];
 
-        // Initialize the PCB
-        new_pcb->kernel_sp = allocKernelPage(1);
-        new_pcb->user_sp = allocUserPage(1);
-        new_pcb->pid = process_id++;
-        new_pcb->status = TASK_READY;
-        new_pcb->cursor_x = 0;
-        new_pcb->cursor_y = i; // Give each task its own line to start
+    //     // Initialize the PCB
+    //     new_pcb->kernel_sp = allocKernelPage(KERNEL_STACK_PAGES) + KERNEL_STACK_PAGES * PAGE_SIZE;
+    //     new_pcb->user_sp = allocUserPage(USER_STACK_PAGES) + USER_STACK_PAGES * PAGE_SIZE;
+    //     new_pcb->pid = process_id++;
+    //     new_pcb->status = TASK_READY;
+    //     new_pcb->cursor_x = 0;
+    //     new_pcb->cursor_y = i; // Give each task its own line to start
 
-        // Initialize the stack for the first run
-        init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, new_pcb);
+    //     // Initialize the stack for the first run
+    //     init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, new_pcb);
 
-        // Add the PCB to the ready queue
-        list_add_tail(&new_pcb->list, &ready_queue);
+    //     // Add the PCB to the ready queue
+    //     list_add_tail(&new_pcb->list, &ready_queue);
 
-        // Update the next available task address, page-aligned
-        next_task_addr += tasks[i].byte_size;
-        next_task_addr = (next_task_addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-    }
+    //     // Update the next available task address, page-aligned
+    //     next_task_addr += tasks[i].byte_size;
+    //     next_task_addr = (next_task_addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    // }
 
     /* TODO: [p2-task1] remember to initialize 'current_running' */
     current_running = &pid0_pcb;
@@ -236,6 +255,16 @@ static void init_pcb(void)
 static void init_syscall(void)
 {
     // TODO: [p2-task3] initialize system call table.
+    syscall[SYSCALL_SLEEP] = (long (*)())&do_sleep;
+    syscall[SYSCALL_YIELD] = (long (*)())&do_scheduler;
+    syscall[SYSCALL_WRITE] = (long (*)())&screen_write;
+    syscall[SYSCALL_CURSOR] = (long (*)())&screen_move_cursor;
+    syscall[SYSCALL_REFLUSH] = (long (*)())&screen_reflush;
+    syscall[SYSCALL_GET_TIMEBASE] = (long (*)())&get_time_base;
+    syscall[SYSCALL_GET_TICK] = (long (*)())&get_ticks;
+    syscall[SYSCALL_LOCK_INIT] = (long (*)())&do_mutex_lock_init;
+    syscall[SYSCALL_LOCK_ACQ] = (long (*)())&do_mutex_lock_acquire;
+    syscall[SYSCALL_LOCK_RELEASE] = (long (*)())&do_mutex_lock_release;
 }
 /************************************************************/
 

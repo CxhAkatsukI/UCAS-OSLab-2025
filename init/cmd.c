@@ -11,6 +11,9 @@
 #include <type.h>
 #include <cmd.h>
 
+#define KERNEL_STACK_PAGES 4
+#define USER_STACK_PAGES 1
+
 // define batch sequence buffer
 static char batch_sequence_buffer[BATCH_FILE_SIZE_SECTORS * SECTOR_SIZE];
 
@@ -663,16 +666,25 @@ end_batch_mode_check:
  * @return Always returns 0.
  */
 int cmd_wrq(char *args) {
-    // Check for empty arguments
-    if (args == NULL || *args == '\0') {
-        bios_putstr(ANSI_FMT("ERROR: Usage: wrq <task_name1> <task_name2> ...", ANSI_BG_RED));
-        bios_putstr(ANSI_FMT("\n\r", ANSI_NONE)); // Newline and reset color.
-        return 0;
-    }
-
-    // --- Tokenize the input arguments into individual task names ---
     char parsed_names[MAX_BATCH_TASKS][MAX_NAME_LEN];
-    int num_parsed_tasks = tokenize_string(args, parsed_names, MAX_BATCH_TASKS);
+    int num_parsed_tasks;
+
+    // Check for wildcard '*', if so, load all tasks
+    if (args != NULL && strcmp(args, "*") == 0) {
+        num_parsed_tasks = 12;
+        char *all_tasks[] = {"fly", "fly1", "fly2", "fly3", "fly4", "fly5", "lock1", "lock2", "print1", "print2", "sleep", "timer"};
+        for (int i = 0; i < num_parsed_tasks; ++i) {
+            strncpy(parsed_names[i], all_tasks[i], MAX_NAME_LEN);
+        }
+    } else {
+        // Check for empty arguments
+        if (args == NULL || *args == '\0') {
+            bios_putstr(ANSI_FMT("ERROR: Usage: wrq <task_name1> <task_name2> ... or wrq *\n\r", ANSI_BG_RED));
+            return 0;
+        }
+        // Tokenize the input arguments into individual task names
+        num_parsed_tasks = tokenize_string(args, parsed_names, MAX_BATCH_TASKS);
+    }
 
     if (num_parsed_tasks <= 0) {
         bios_putstr(ANSI_FMT("ERROR: No tasks provided for demo.", ANSI_BG_RED));
@@ -699,8 +711,8 @@ int cmd_wrq(char *args) {
         ptr_t entry_point = load_task_img(tasks[task_idx].name, tasknum, next_task_addr);
 
         // Initialize the PCB
-        new_pcb->kernel_sp = allocKernelPage(1);
-        new_pcb->user_sp = allocUserPage(1);
+        new_pcb->kernel_sp = allocKernelPage(KERNEL_STACK_PAGES) + KERNEL_STACK_PAGES * PAGE_SIZE;
+        new_pcb->user_sp = allocUserPage(USER_STACK_PAGES) + USER_STACK_PAGES * PAGE_SIZE;
         new_pcb->pid = process_id++;
         new_pcb->status = TASK_READY;
         new_pcb->cursor_x = 0;

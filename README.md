@@ -1,220 +1,79 @@
-## RISC-V OS Experiment - Project 1
+# Project 2, Task 3: True System Calls and Privilege Separation
 
-This branch fulfills the requirements up to Task 5 (C-Core) for project 1 as describe in the lecture notes and guidebook.
+## 1. Objective
 
-### Task 1: Simple Bootloader
-*   Developed a basic bootloader (`arch/riscv/boot/bootblock.S`) capable of printing a custom welcome message to the console using BIOS functions. This demonstrates understanding of the boot process and assembly-level BIOS calls.
+The primary objective of Task 3 was to implement a robust system call mechanism with true privilege separation in our RISC-V operating system. This involved transitioning user applications from running in the same privilege level as the kernel to executing in User Mode (U-Mode), while the kernel operates in Supervisor Mode (S-Mode). All requests from user programs for kernel services must now be mediated through the `ecall` instruction, ensuring system stability and security.
 
-### Task 2: Kernel Loading and Initialization
-*   Modified the bootloader (`bootblock.S`) to load the kernel from the SD card into a predefined memory location.
-*   Implemented kernel entry point (`arch/riscv/kernel/head.S`) to clear the BSS segment and set up the stack pointer for the kernel's C environment.
-*   Initialized the kernel's main function (`init/main.c`) to print a "Hello OS!" message and echo characters from the console.
+## 2. Key Concepts Implemented & Explored
 
-### Task 3 (Integrated into Task 4): Application Loading
-*   Developed the `createimage` tool (`tools/createimage.c`) to combine the bootloader, kernel, and user applications into a single image file.
-*   Implemented the `loader` (`kernel/loader/loader.c`) to load user applications into memory.
-*   Implemented the C runtime (`arch/riscv/crt0/crt0.S`) for user applications, including BSS clearing and stack setup.
+*   **Privilege Levels:** Deep understanding and implementation of the distinction between User Mode (U-Mode) for applications and Supervisor Mode (S-Mode) for the kernel.
+*   **RISC-V Control and Status Registers (CSRs):** Extensive use of `stvec`, `sstatus`, `sepc`, `scause`, `sscratch`, `medeleg` for managing exceptions and interrupts.
+*   **`ecall` Instruction:** The fundamental instruction used by user programs to trigger a system call, causing a trap into S-Mode.
+*   **`sret` Instruction:** The instruction used by the kernel to return from an exception, restoring the previous privilege level (U-Mode) and execution context.
+*   **Exception Frame:** A structured area on the kernel stack used to save the complete CPU state (general-purpose registers and CSRs) of a user program when a trap occurs.
+*   **Kernel Stack vs. User Stack:** Maintaining separate stack spaces for kernel and user execution contexts.
+*   **Task States:** Implementation of `TASK_BLOCKED` and `TASK_READY` states for sleeping tasks.
+*   **Non-Preemptive Scheduling:** Continued use of cooperative scheduling, with `sys_yield` and `sys_sleep` allowing tasks to voluntarily relinquish the CPU.
 
-### Task 4: Tight Packing and Application Loading by Name
-*   **Tight Packing:** Modified `createimage.c` to store the kernel and user applications in the image file using their actual sizes, without fixed-size padding between them (only the bootblock is padded to one sector). This optimizes image space utilization.
-*   **Application Metadata:** Extended `task_info_t` to store each application's name, actual byte offset, byte size, start sector, and total sectors required. This metadata is stored in the first sector of the image.
-*   **Static Loading:** The kernel's `loader` (`kernel/loader/loader.c`) now uses this precise metadata to load applications from the image into their fixed memory regions.
-*   **Launch by Name:** The kernel's command-line interface (`init/cmd.c`) allows users to launch applications by typing their names (e.g., `exec 2048`).
+## 3. Implementation Details
 
-### Task 5 (C-Core): Batch Processing System
-*   **Command-Line Interface (CLI):** Implemented a robust CLI in `init/cmd.c` with custom tokenization, supporting commands:
-    *   `help`: Displays available commands.
-    *   `ls`: Lists all loaded user applications.
-    *   `exec <task_name_or_id>`: Executes a single user application.
-    *   `write_batch <task1> <task2> ...`: Writes a sequence of task names to a persistent batch file within the image.
-    *   `exec_batch`: Executes the stored batch processing sequence.
-*   **Persistent Batch State:** Batch processing state (e.g., `in_batch_mode`, `current_task_index`, `io_buffer`) is stored in fixed locations within the first sector of the image, making it persistent across kernel restarts.
-*   **Sequential Execution:** The kernel automatically continues batch processing after each application finishes, leveraging a kernel restart mechanism.
-*   **Input/Output Passing:**
-    *   `crt0.S` saves the return value of an application (in `a0`) to a designated `batch_io_buffer` in the first sector.
-    *   The kernel's batch handler reads this value and sets input calue for the next application, effectively passing output as input.
-*   **Number Processing Applications:** Four custom user applications (`app_num1.c`, `app_num2.c`, `app_num3.c`, `app_num4.c`) are provided to demonstrate the input/output passing mechanism:
-    1.  `app_num1`: Outputs an initial number.
-    2.  `app_num2`: Receives input, adds 10, outputs result.
-    3.  `app_num3`: Receives input, multiplies by 3, outputs result.
-    4.  `app_num4`: Receives input, squares the result, outputs result.
+This task involved significant modifications across multiple kernel components:
 
-## Memory Layout
+### a. Assembly Layer (`arch/riscv/kernel/entry.S`, `arch/riscv/kernel/trap.S`)
 
-The image file is structured as follows:
-1.  **Sector 0 (Bootblock):** Contains the bootloader code and critical metadata (kernel size, task information array, batch file start sector, batch state variables).
-2.  **Kernel:** Immediately follows the bootblock, tightly packed.
-3.  **User Applications:** Follow the kernel, each tightly packed.
-4.  **Batch File:** Located immediately after the last user application, reserved for storing batch sequences.
+*   **`setup_exception` (`trap.S`):** Configured the `stvec` CSR to point to our `exception_handler_entry` in S-Mode, establishing the entry point for all traps.
+*   **`SAVE_CONTEXT` Macro (`entry.S`):**
+    *   Performs an atomic stack swap (`csrrw sp, sscratch, sp`) to switch from the user stack to a dedicated kernel stack upon trap entry.
+    *   Saves all user-mode general-purpose registers (x1-x31, excluding x0) and critical CSRs (`sstatus`, `sepc`, `scause`, `stval`) onto the kernel stack, forming the exception frame.
+    *   **Special Handling for `tp`:** The `tp` (thread pointer) register is not saved/restored as part of the user context in `SAVE_CONTEXT`/`RESTORE_CONTEXT` because it is exclusively managed by the kernel to point to `current_running`.
+*   **`RESTORE_CONTEXT` Macro (`entry.S`):**
+    *   The inverse of `SAVE_CONTEXT`. Restores all saved registers and CSRs from the kernel stack.
+    *   Avoids restoring `tp` from the saved user context to prevent overwriting the kernel's `tp`.
+*   **`exception_handler_entry` (`entry.S`):**
+    *   The hardware entry point for all traps. It calls `SAVE_CONTEXT`.
+    *   Sets the `ra` register to `ret_from_exception` to ensure proper return flow after C-level handling.
+    *   Passes the exception frame pointer (`regs`), `stval`, and `scause` as arguments to the C-level `interrupt_helper`.
+*   **`ret_from_exception` (`entry.S`):**
+    *   Calls `RESTORE_CONTEXT`.
+    *   Increments `sepc` by 4 for `ecall` exceptions (handled in `handle_syscall`) to ensure execution resumes after the `ecall` instruction.
+    *   Performs the final stack swap (`csrrw sp, sscratch, sp`) to return to the user stack.
+    *   Executes `sret` to return to the user program in U-Mode.
+*   **`switch_to` (`entry.S`):**
+    *   Modified to explicitly set the `tp` register to the `next_pcb` pointer (`mv tp, a1`) during a context switch. This ensures `tp` always points to the correct `current_running` PCB in kernel mode.
 
-## Build Instructions
+### b. C Kernel Layer (`kernel/irq/irq.c`, `kernel/syscall/syscall.c`, `kernel/sched/sched.c`, `init/main.c`)
 
-To build the project, navigate to the project root directory and use the following `make` commands:
+*   **`init_exception` (`irq.c`):** Initialized the `exc_table` array, mapping `EXCC_SYSCALL` to the `handle_syscall` function.
+*   **`interrupt_helper` (`irq.c`):** The C-level trap dispatcher. It checks the `scause` register to differentiate between interrupts and exceptions, then calls the appropriate handler from `irq_table` or `exc_table`.
+*   **`handle_syscall` (`syscall.c`):**
+    *   Extracts the syscall number (from `regs->regs[17]`, i.e., `a7`) and arguments (from `regs->regs[10-15]`, i.e., `a0-a5`) from the saved exception frame.
+    *   Calls the corresponding kernel function via the `syscall` function pointer array.
+    *   Places the return value from the kernel function into `regs->regs[10]` (`a0`) for the user program.
+    *   Crucially, increments `regs->sepc` by 4 to ensure the user program resumes execution after the `ecall` instruction.
+*   **`init_syscall` (`main.c`):** Populated the global `syscall` array, mapping `SYSCALL_` constants to their respective kernel function implementations (e.g., `SYSCALL_YIELD` to `do_scheduler`, `SYSCALL_LOCK_ACQ` to `do_mutex_lock_acquire`).
+*   **`init_pcb_stack` (`sched.c`):** Configured the "fake" exception frame for newly created tasks to ensure they start correctly in U-Mode:
+    *   Set `sepc` to the task's entry point.
+    *   Set `sstatus` to return to U-Mode (SPP=0) with interrupts enabled (SPIE=1).
+    *   Set the user stack pointer (`regs->regs[2]`) to the task's allocated user stack.
+*   **`do_sleep` (`sched.c`):** Implemented to mark the `current_running` task as `TASK_BLOCKED`, set its `wakeup_time`, add it to the `sleep_queue`, and call `do_scheduler`.
+*   **`check_sleeping` (`time.c`):** Implemented to iterate through the `sleep_queue` and move tasks whose `wakeup_time` has passed back to the `ready_queue` using `do_unblock`. This function is called at the beginning of `do_scheduler`.
 
-*   `make clean`: Cleans up all generated build files and the `build/` directory.
-*   `make all`: Performs a full build, including:
-    *   Compiling the bootloader.
-    *   Compiling the kernel (including `main.c`, `cmd.c`, `loader.c`, etc.).
-    *   Compiling the user applications (e.g., `2048`, `auipc`, `bss`, `data`, `app_num1` to `app_num4`).
-    *   Compiling the `createimage` tool.
-    *   Generating the final `build/image` file.
-*   `make image`: Only generates the `build/image` file using the `createimage` tool.
-*   `make run`: Starts QEMU with the generated `build/image`.
-*   `make debug`: Starts QEMU in debug mode, waiting for a GDB connection.
+### c. User Library Layer (`tiny_libc/syscall.c`)
 
-## Usage Instructions
+*   **`invoke_syscall`:** The low-level interface for user programs. It uses inline assembly to load the syscall number into `a7` and arguments into `a0-a5`, executes `ecall`, and returns the value from `a0`.
+*   **`sys_*` wrappers:** All user-facing system call functions (e.g., `sys_yield`, `sys_move_cursor`, `sys_mutex_init`) were updated to call `invoke_syscall`.
 
-1.  **Build the project:**
-    ```bash
-    make all
-    ```
-2.  **Run QEMU:**
-    ```bash
-    make run
-    ```
-3.  **In the QEMU console:**
-    *   Type `loadboot` and press Enter.
-    *   The kernel will boot, print "Hello OS!", and present a `(cmd)` prompt.
+## 4. Challenges & Learnings
 
-### Available Commands:
+*   **`tp` Register Management:** The `tp` register, designated as `current_running`, required careful handling. It must be correctly set to the kernel's `current_running` PCB upon entering an exception (via `switch_to` or explicit load in `exception_handler_entry`) and preserved across kernel C function calls. It should not be saved/restored as part of the user's context in `SAVE_CONTEXT`/`RESTORE_CONTEXT` to avoid corruption.
+*   **Linked List Corruption (Double-Delete):** A subtle bug in `check_sleeping` where `list_del` was called redundantly before `do_unblock`, leading to linked list corruption and `Store/AMO access fault`. This highlighted the importance of careful list manipulation.
+*   **Debugging Techniques:** Extensive use of GDB (breakpoints, `si`, `n`, `p`, `x`, `watch`) was crucial for tracing execution flow, inspecting registers, and pinpointing memory corruption. Custom `dbprint` macros were instrumental in providing real-time execution traces.
+*   **Build System Nuances:** Understanding how the assembler processes `.S` files and the implications of including C headers or referencing C variables from assembly.
 
-*   **`help`**: Displays a list of all supported commands and their descriptions.
-*   **`ls`**: Lists all currently loaded user applications by their index and name.
-*   **`exec <task_name_or_id>`**: Executes a specific user application.
-    *   Example: `exec 2048` or `exec 0` (if 2048 is task 0).
-*   **`write_batch <task1_name> <task2_name> ...`**: Writes a batch sequence to the image.
-    *   Example: `write_batch app_num1 app_num2 app_num3 app_num4`
-*   **`exec_batch`**: Executes the batch sequence previously written to the image.
+## 5. How to Run/Test
 
-### Example Batch Processing Workflow:
-
-1.  **List available applications:**
-    ```shell
-    (cmd) ls
-    Info: Listing tasks:
-      [0] 2048
-      [1] auipc
-      [2] bss
-      [3] data
-      [4] app_num1
-      [5] app_num2
-      [6] app_num3
-      [7] app_num4
-    ```
-2.  **Write a batch sequence:**
-    ```shell
-    (cmd) write_batch app_num1 app_num2 app_num3 app_num4
-    Info: Batch sequence written to image successfully.
-    ```
-3.  **Execute the batch:**
-    ```shell
-```
-```
-    (cmd) exec_batch
-    Info: Starting batch execution...
-    Info: Now executing task 1, app_num1
-    Info: Windows is loading files...
-    DEBUG: Loaded 'app_num1'. First bytes in memory:
-      17 05 00 00 13 05 85 08 97 05 00 00 93 85 05 08
-      Last bytes in memory:
-      18 00 00 00 c6 ff ff ff 04 00 00 00 00 00 00 00
-    Info: Starting task...
-    DEBUG: task detected, '2048'
-    DEBUG: task detected, 'app_num1'
-    DEBUG: task detected, 'app_num2'
-    DEBUG: task detected, 'app_num3'
-    DEBUG: task detected, 'app_num4'
-    DEBUG: task detected, 'auipc'
-    DEBUG: task detected, 'bss'
-    DEBUG: task detected, 'data'
-    Info: Hello OS!
-    Info: bss check: t version: 2
-    Info: Continuing batch processing...
-    Info: Launching next task in batch: app_num2
-    Info: Got return value 5, passing it to 'a0'.
-    Info: Now executing task 2, app_num2
-    Info: Windows is loading files...
-    DEBUG: Loaded 'app_num2'. First bytes in memory:
-      17 05 00 00 13 05 05 09 97 05 00 00 93 85 85 08
-      Last bytes in memory:
-      18 00 00 00 be ff ff ff 0c 00 00 00 00 00 00 00
-    Info: Starting task...
-    DEBUG: task detected, '2048'
-    DEBUG: task detected, 'app_num1'
-    DEBUG: task detected, 'app_num2'
-    DEBUG: task detected, 'app_num3'
-    DEBUG: task detected, 'app_num4'
-    DEBUG: task detected, 'auipc'
-    DEBUG: task detected, 'bss'
-    DEBUG: task detected, 'data'
-    Info: Hello OS!
-    Info: bss check: t version: 2
-    Info: Continuing batch processing...
-    Info: Launching next task in batch: app_num3
-    Info: Got return value 15, passing it to 'a0'.
-    Info: Now executing task 3, app_num3
-    Info: Windows is loading files...
-    DEBUG: Loaded 'app_num3'. First bytes in memory:
-      17 05 00 00 13 05 85 09 97 05 00 00 93 85 05 09
-      Last bytes in memory:
-      18 00 00 00 b6 ff ff ff 14 00 00 00 00 00 00 00
-    Info: Starting task...
-    DEBUG: task detected, '2048'
-    DEBUG: task detected, 'app_num1'
-    DEBUG: task detected, 'app_num2'
-    DEBUG: task detected, 'app_num3'
-    DEBUG: task detected, 'app_num4'
-    DEBUG: task detected, 'auipc'
-    DEBUG: task detected, 'bss'
-    DEBUG: task detected, 'data'
-    Info: Hello OS!
-    Info: bss check: t version: 2
-    Info: Continuing batch processing...
-    Info: Launching next task in batch: app_num4
-    Info: Got return value 45, passing it to 'a0'.
-    Info: Now executing task 4, app_num4
-    Info: Windows is loading files...
-    DEBUG: Loaded 'app_num4'. First bytes in memory:
-      17 05 00 00 13 05 05 09 97 05 00 00 93 85 85 08
-      Last bytes in memory:
-      18 00 00 00 be ff ff ff 0e 00 00 00 00 00 00 00
-    Info: Starting task...
-    DEBUG: task detected, '2048'
-    DEBUG: task detected, 'app_num1'
-    DEBUG: task detected, 'app_num2'
-    DEBUG: task detected, 'app_num3'
-    DEBUG: task detected, 'app_num4'
-    DEBUG: task detected, 'auipc'
-    DEBUG: task detected, 'bss'
-    DEBUG: task detected, 'data'
-    Info: Hello OS!
-    Info: bss check: t version: 2
-    Info: Continuing batch processing...
-    Info: Batch processing finished.
-    Info: Final return value: 2025.
-    Info: Loaded 8 tasks.
-    (cmd)
-```
-```
-
-## Project Structure
-
-*   `arch/riscv/`: RISC-V specific assembly and BIOS code (`bootblock.S`, `head.S`, `crt0.S`, `common.c`).
-*   `build/`: Generated build artifacts (ELF files, `image`).
-*   `include/`: Kernel-wide header files (`os/kernel.h`, `os/task.h`, `os/string.h`, `cmd.h`, `type.h`).
-*   `init/`: Kernel initialization code (`main.c`, `cmd.c`).
-*   `kernel/loader/`: Application loader (`loader.c`).
-*   `libs/`: Utility functions (`string.c`).
-*   `test/test_project1/`: User application source files (`2048.c`, `auipc.c`, `bss.c`, `data.c`, `app_num1.c` to `app_num4.c`).
-*   `tools/`: Host-side tools (`createimage.c`).
-*   `Makefile`: Project build system.
-*   `riscv.lds`: Linker script.
-
-## Challenges Encountered & Solutions & Development Notes
-
-See `development_note.md`.
-
-## References
-
-*   Lecture 1 Bootloader (PowerPoint)
-*   Operating Systems Project 1 – Bootloader Guidebook
+*   Compile the kernel: `make all`
+*   Run the kernel with QEMU: `make run`
+*   At the `(cmd)` prompt, use the new `wrq` command:
+    *   To run specific tasks: `wrq print1 print2 fly lock1 lock2`
+    *   To run all available test tasks: `wrq *`

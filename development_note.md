@@ -1,800 +1,178 @@
-### Preparations
+## Understanding the big picture
 
-Before we move on to our real tasks, let's do some preparation work first. We've already generated a compilation database `compile_commands.json`. We first add it to `.gitignore`.
+Here is the blueprint of the execution flow after the system boots:
 
-Now, lets execute the following command to move `compile_command.json` out of Git's tracking, without removing the file:
+1.  **`main()` Starts**: After the assembly boot code finishes, it jumps to the `main()` function in `init/main.c`. At this point, there are no processes, just a single thread of execution running in kernel mode. We can think of this as **"Process 0"** or the idle process, which is represented by `pid0_pcb`.
 
-```bash
-git rm --cached compile_commands.json
-```
+2.  **`init_jmptab()`**: This function sets up a simple "jump table". Since we don't have real system calls yet, user programs will use this table to call kernel functions. For Task 1, the most important one is `jmptab[YIELD] = (long (*)())do_scheduler;`. This means when a user task calls `yield()`, it will directly call your `do_scheduler` function.
 
-Then, we can execute the following command to check whether `compile_commands.json` has been deleted from Git's index:
+3.  **`init_task_info()`**: This reads the application metadata (like task names, e.g., `"print1"`, `"fly"`) that the build tools burned into a specific memory location. It populates the `tasks` array.
 
-```bash
-❯ git status
-On branch Project1
-Your branch is ahead of 'origin/Project1' by 1 commit.
-  (use "git push" to publish your local commits)
+4.  **`init_pcb()`**: This is **your first major job in Task 1**. This function's purpose is to:
+    *   Create and initialize a Process Control Block (`pcb_t`) for each task found by `init_task_info`.
+    *   Prepare each process to be run for the first time.
+    *   Set the global `current_running` pointer to `pid0_pcb`, because the kernel's idle process is what's running initially.
 
-Changes to be committed:
-  (use "git restore --staged <file>..." to unstage)
-        deleted:    compile_commands.json
+5.  **Other Inits**: `init_locks()`, `init_exception()`, etc., are called to set up other kernel subsystems.
 
-Untracked files:
-  (use "git add <file>..." to include in what will be committed)
-        .asm-lsp.toml
-        .cache/
-        .gitignore
-        prime_check
-```
+Of course. Here is that phase of the execution flow converted into Markdown.
 
-We shall add `.gitignore` by executing:
+**Phase 2: The First Context Switch**
 
-```bash
-git add .gitignore
-```
+1.  The `while(1)` loop in `main()` calls `do_scheduler()`.
 
-Now that everything is ready for commit:
+2.  **Inside `do_scheduler()`:**
+    *   `current_running` is currently `pid0_pcb`.
+    *   Your code should pick the first task from the `ready_queue` (e.g., the PCB for "print1").
+    *   Then, you'll call `switch_to(&pid0_pcb, &pcb_for_print1)`.
 
-```bash
-❯ git status
-On branch Project1
-Your branch is ahead of 'origin/Project1' by 1 commit.
-  (use "git push" to publish your local commits)
+3.  **Inside `switch_to()`:**
+    *   It saves the context of the current process (`pid0_pcb`). This isn't very important right now, but it's part of the process.
+    *   It then restores the context of the next process ("print1").
+    *   > This is the magic moment. Because of the "fake context" you created during `init_pcb`, the `ra` (return address) register will be loaded with the entry point of the "print1" task.
+    *   When `switch_to` executes its final `ret` instruction, it doesn't return to `do_scheduler`. Instead, it "returns" to the beginning of the "print1" code, and that task starts executing
 
-Changes to be committed:
-  (use "git restore --staged <file>..." to unstage)
-        new file:   .gitignore
-        deleted:    compile_commands.json
+## Task 1
+### Implementing `init_pcb()`
 
-Untracked files:
-  (use "git add <file>..." to include in what will be committed)
-        .asm-lsp.toml
-        .cache/
-        prime_check
-```
-
-We can execute `git commit` to commit our changes.
-
-Let's push our changes by executing:
-
-```bash
-git push --set-upstream origin Project1
-```
-
-or, if we've already executed this command before, we can just simply use:
-
-```bash
-git push
-```
-
-> [!Note] About the `--set-upstream` flag
-> The `--set-upstream` argument in `git push --set-upstream origin Project1` establishes a tracking relationship between our local `Project1` branch and the `Project1` branch on the `origin` remote.
-
-### Making our first boot block
-
-First, we can complete the required code in `arch/riscv/boot/bootblock.S`:
-
-```nasm
-  // TODO: [p1-task1] call BIOS to print string "It's bootblock!"
-  la a0, boot_msg
-  li a7, BIOS_PUTSTR
-  call bios_func_entry
-.data
-	boot_msg: .sting "It's Chuxiao Han's bootloader!"
-```
-
-Then, we can do `make dirs` and `make elf` as required. Note that if we've executed `make` before, we can do `make clean` first. The commands and outputs are as follows:
-
-```bash
-❯ make clean
-rm -rf ./build
-
-❯ make elf
-riscv64-unknown-linux-gnu-gcc -O2 -std=gnu11 -fno-builtin -nostdlib -nostdinc -Wall -mcmodel=medany -ggdb3 -I./arch/riscv/include -Wl,--defsym=TEXT_START=0x50200000 -T riscv.lds -o build/bootblock ./arch/riscv/boot/bootblock.S -e main
-/opt/riscv64-linux/bin/../lib/gcc/riscv64-unknown-linux-gnu/15.1.0/../../../../riscv64-unknown-linux-gnu/bin/ld: cannot open output file build/bootblock: No such file or directory
-collect2: error: ld returned 1 exit status
-make: *** [Makefile:141: build/bootblock] Error 1
-
-❯ make dirs
-
-❯ make elf
-riscv64-unknown-linux-gnu-gcc -O2 -std=gnu11 -fno-builtin -nostdlib -nostdinc -Wall -mcmodel=medany -ggdb3 -I./arch/riscv/include -Wl,--defsym=TEXT_START=0x50200000 -T riscv.lds -o build/bootblock ./arch/riscv/boot/bootblock.S -e main
-/opt/riscv64-linux/bin/../lib/gcc/riscv64-unknown-linux-gnu/15.1.0/../../../../riscv64-unknown-linux-gnu/bin/ld: warning: build/bootblock has a LOAD segment with RWX permissions
-riscv64-unknown-linux-gnu-gcc -O2 -std=gnu11 -fno-builtin -nostdlib -nostdinc -Wall -mcmodel=medany -ggdb3 -I./arch/riscv/include -Iinclude -Wl,--defsym=TEXT_START=0x50201000 -T riscv.lds -o build/main ./arch/riscv/kernel/head.S ./init/main.c ./arch/riscv/bios/common.c ./kernel/loader/loader.c ./libs/string.c
-/opt/riscv64-linux/bin/../lib/gcc/riscv64-unknown-linux-gnu/15.1.0/../../../../riscv64-unknown-linux-gnu/bin/ld: warning: build/main has a LOAD segment with RWX permissions
-riscv64-unknown-linux-gnu-gcc -O2 -std=gnu11 -fno-builtin -nostdlib -nostdinc -Wall -mcmodel=medany -ggdb3 -I./tiny_libc/include -I./arch/riscv/include -c arch/riscv/crt0/crt0.S -o build/crt0.o
-riscv64-unknown-linux-gnu-gcc -O2 -std=gnu11 -fno-builtin -nostdlib -nostdinc -Wall -mcmodel=medany -ggdb3 -I./tiny_libc/include -o build/2048 ./build/crt0.o test/test_project1/2048.c -Wl,--defsym=TEXT_START=0x52000000 -T riscv.lds
-riscv64-unknown-linux-gnu-gcc -O2 -std=gnu11 -fno-builtin -nostdlib -nostdinc -Wall -mcmodel=medany -ggdb3 -I./tiny_libc/include -o build/auipc ./build/crt0.o test/test_project1/auipc.c -Wl,--defsym=TEXT_START=0x52010000 -T riscv.lds
-riscv64-unknown-linux-gnu-gcc -O2 -std=gnu11 -fno-builtin -nostdlib -nostdinc -Wall -mcmodel=medany -ggdb3 -I./tiny_libc/include -o build/bss ./build/crt0.o test/test_project1/bss.c -Wl,--defsym=TEXT_START=0x52020000 -T riscv.lds
-/opt/riscv64-linux/bin/../lib/gcc/riscv64-unknown-linux-gnu/15.1.0/../../../../riscv64-unknown-linux-gnu/bin/ld: warning: build/bss has a LOAD segment with RWX permissions
-riscv64-unknown-linux-gnu-gcc -O2 -std=gnu11 -fno-builtin -nostdlib -nostdinc -Wall -mcmodel=medany -ggdb3 -I./tiny_libc/include -o build/data ./build/crt0.o test/test_project1/data.c -Wl,--defsym=TEXT_START=0x52030000 -T riscv.lds
-/opt/riscv64-linux/bin/../lib/gcc/riscv64-unknown-linux-gnu/15.1.0/../../../../riscv64-unknown-linux-gnu/bin/ld: warning: build/data has a LOAD segment with RWX permissions
-```
-
-Then, we execute:
-
-```bash
-cp createimage build/
-```
-
-Next, we'll create an image with the following command:
-
-```bash
-❯ chmod +x createimage && cd build && ../createimage --extended bootblock main && cd ..
-0x50200000: bootblock
-        segment 0
-                offset 0x1053           vaddr 0x0000
-                filesz 0x0072           memsz 0x0000
-        segment 1
-                offset 0x1000           vaddr 0x50200000
-                filesz 0x0053           memsz 0x0053
-                writing 0x0053 bytes
-                padding up to 0x0200
-0x50201000: main
-        segment 0
-                offset 0x156a           vaddr 0x0000
-                filesz 0x0078           memsz 0x0000
-        segment 1
-                offset 0x1000           vaddr 0x50201000
-                filesz 0x0558           memsz 0x0590
-                writing 0x0590 bytes
-                padding up to 0x0800
-        segment 2
-                offset 0x1334           vaddr 0x50201334
-                filesz 0x0094           memsz 0x0094
-                writing 0x0094 bytes
-                padding up to 0x0a00
-        segment 3
-                offset 0x0000           vaddr 0x0000
-                filesz 0x0000           memsz 0x0000
-os_size: 4 sectors
-```
-
-This indicates a successful image creation.
-
-After the image is created, we use `make run` to start `QEMU`. We shall type in `loadboot` command to see the desired result:
-
-```
-❯ make run
-/home/stu/OSLab-RISC-V/qemu/riscv64-softmmu/qemu-system-riscv64 -nographic -machine virt -m 256M -kernel /home/stu/OSLab-RISC-V/u-boot/u-boot -bios none -drive if=none,format=raw,id=image,file=./build/image -device virtio-blk-device,drive=image -monitor telnet::45454,server,nowait -serial mon:stdio
-
-
-U-Boot 2024.07UCAS_OS DASICS v3.1.0-00024-gf507a8a632-dirty (Sep 07 2025 - 00:28:01 +0000)
-
-CPU:   rv64imafdch_zicbom_zicboz_zicsr_zifencei_zihintpause_zawrs_zfa_zca_zcd_zba_zbb_zbc_zbs_sstc_svadu
-Model: riscv-virtio,qemu
-DRAM:  256 MiB
-In:    serial@10000000
-Out:   serial@10000000
-Err:   serial@10000000
-Net:   No ethernet found.
-Hit any key to stop autoboot:  0
-
-Device 0: QEMU VirtIO Block Device
-            Type: Hard Disk
-            Capacity: 0.0 MB = 0.0 GB (5 x 512)
-... is now current device
-** Invalid partition 1 **
-No ethernet found.
-No ethernet found.
-
-virtio read: device 0 block # 0, count 2 ... 2 blocks read: OK
-=> loadboot
-It's Chuxiao Han's bootloader...
-QEMU: Terminated
-```
-
-### Loading and initializing Memory
-
-The code and logic is as follows:
-
-```nasm
-  // TODO: [p1-task2] call BIOS to read kernel in SD card
-  // a1: hold os_size
-  // first load os_size in a1
-  lh a1, os_size_loc
-  // a0: param1, for mem_address
-  // a1: param2, for num_of_block
-  // a2: param3, for block_id
-  // prepare to call `bios_sd_read`
-  li a0, kernel
-  li a2, 1
-  li a7, BIOS_SDREAD
-  jal bios_func_entry
-
-
-  // TODO: [p1-task4] load task-related arguments and pass them to kernel
-
-  ...
-
-  // TODO: [p1-task2] jump to kernel to start UCAS-OS
-  j kernel
-
-```
-
-### Clearing the `bss` Section
-
-The `bss` relevant symbols are defined in `riscv.lds`. In this script, we can find the following symbols:
-
-```
-__bss_start
-__BSS_END__
-```
-
-So, to clear the `bss` section, we shall utilize these two symbols. After cleaning that section, we shall set up the stack pointer and jump to kernel main function. The code is as follows:
-
-```nasm
-  /* TODO: [p1-task2] clear BSS for flat non-ELF images */
-  // a0: start pointer and `CURRENT` pointer
-  // a1: end pointer
-  la a0, __bss_start
-  la a1, __BSS_END__
-
-  clear_bss_loop_start:
-
-  sw zero, (a0)
-  addi a0, a0, 4
-  blt a0, a1, clear_bss_loop_start
-
-  // set up the stack pointer
-  li sp, KERNEL_STACK
-
-  // jump to kernel `main` function
-  jal main
-```
-
-### Reading From Console and Echoes Characters Back
-
-We need to modify `init/main.c`, After `Hello OS!` and `buf` is printed out, we add the following code:
+This function handles `pcb` initializing. It loops through all the available tasks and initializes the `pcb` array:
 
 ```C
-    // Use BIOS API to read characters from console and echoes back ( •̀ ω •́ )✧)
-    while (1) {
-        char input = bios_getchar();
-        bios_putchar(input);
-    }
-```
-
-And the console will output the characters that we've just input.
-
-## Task 3
-
-### Implementing `write_img_info` function
-
-For task3, we shall first implement the `write_img_info` function. This function writes metadata into the first sector (first 512 bytes) of our image file.
-
-Before emtering the implementation of this function, we can define some macros for the address of these metadata:
-
-```C
-#define OS_SIZE_LOC (BOOT_LOADER_SIG_OFFSET - 2)
-#define TASK_NUM_LOC (BOOT_LOADER_SIG_OFFSET - 4)
-#define TASK_INFO_LOC (BOOT_LOADER_SIG_OFFSET - 6 - (TASK_MAXNUM * sizeof(task_info_t)))
-```
-
-What's more, we can design our `task_info_t` here:
-
-```C
-/* TODO: [p1-task4] design your own task_info_t */
-typedef struct {
-    uint16_t start_sector;
-    uint16_t size;
-} task_info_t;
-```
-
-In this function, we can use `fseek` to move pointer to the desired location of our image file pointer, and use `fwrite` to write information into those locations:
-
-```C
-static void write_img_info(int nbytes_kernel, task_info_t *taskinfo,
-                           short tasknum, FILE * img)
+static void init_pcb(void)
 {
-    // TODO: [p1-task3] & [p1-task4] write image info to some certain places
-    // NOTE: os size, infomation about app-info sector(s) ...
-
-    // find position for TASK_INFO_LOC
-    fseek(img, TASK_INFO_LOC, SEEK_SET);
-    fwrite(taskinfo, sizeof(task_info_t), tasknum, img);
-    // find position for TASK_NUM_LOC
-    fseek(img, TASK_NUM_LOC, SEEK_SET);
-    fwrite(&tasknum, sizeof(short), 1, img);
-    // calc os_size, and find position for OS_SIZE_LOC
-    short os_size = NBYTES2SEC(nbytes_kernel);
-    fseek(img, OS_SIZE_LOC, SEEK_SET);
-    fwrite(&os_size, sizeof(short), 1, img);
-}
-```
-
-### Completing the `create_image()` Loop
-
-In the main loop of this function, we shall write padding bytes for `bootblock`, `kernel` and `tasks`. 
-
-Before implementing the function itself, we can first define some macros to specify the fixed numbers of sectors used by kernel and applications:
-
-```C
-#define FIXED_APP_SECTORS 15
-#define FIXED_KERNEL_SECTORS 15
-```
-
-The implementation of padding bytes writing are as follows:
-
-```C
-        /* write padding bytes */
-        /**
-         * TODO:
-         * 1. [p1-task3] do padding so that the kernel and every app program
-         *  occupies the same number of sectors
-         * 2. [p1-task4] only padding bootblock is allowed!
-         */
-
-        // write paddings for bootblock
-        if (strcmp(*files, "bootblock") == 0) {
-            write_padding(img, &phyaddr, SECTOR_SIZE);
-        }
-
-        // write paddings for kernel
-        if (strcmp(*files, "main") == 0) {
-            write_padding(img, &phyaddr, (1 + FIXED_KERNEL_SECTORS) * SECTOR_SIZE);
-        }
- 
-        // write paddings for tasks
-        if (strcmp(*files, "main") != 0 && strcmp(*files, "bootblock") != 0) {
-            write_padding(img, &phyaddr, (1 + FIXED_KERNEL_SECTORS + (taskidx + 1) * FIXED_APP_SECTORS) * SECTOR_SIZE);
-        }
-
-```
-
-In this function, we should also write information into the `taskinfo` array:
-
-```C
-        // write info into taskinfo[tasknum] struct
-        if (taskidx >= 0) {
-            taskinfo[taskidx] = (task_info_t)
-                {
-                    .size = FIXED_APP_SECTORS,
-                    .start_sector = 1 + FIXED_KERNEL_SECTORS + taskidx * FIXED_APP_SECTORS
-                };
-        }
-```
-
-### Adding Support for `main` function
-
-Note that `main.c` included `os/task.h`, so we shall re-define some relavant macros in this file (but with offset, because those content has been loaded into RAM):
-
-```C
-#define BOOT_LOADER_SIG_OFFSET (0x1fe + 0x50200000)
-#define OS_SIZE_LOC (BOOT_LOADER_SIG_OFFSET - 2)
-#define TASK_NUM_LOC (BOOT_LOADER_SIG_OFFSET - 4)
-#define TASK_INFO_LOC (BOOT_LOADER_SIG_OFFSET - 6 - (TASK_MAXNUM * sizeof(task_info_t)))
-```
-
-Before actually loading the tasks, We can add a simple print sequence to see whether the data has been correctly loaded into the area we've specified:
-
-```C
-    int tasknum = *((short *)TASK_NUM_LOC);
-    for (int i = 0; i < tasknum; i++) {
-        bios_putchar('t');
-    }
-```
-
-After executing `make all`, I executed `make run`. I got these outputs:
-
-```
-=> loadboot
-It's Chuxiao Han's bootloader...
-Hello OS!
-bss check: t version: 2
-tttt
-```
-
-Is it really 4? We shall refer to the image target in Makefile:
-
-```Makefile
-image: $(ELF_CREATEIMAGE) $(ELF_BOOT) $(ELF_MAIN) $(ELF_USER)
-	cd $(DIR_BUILD) && ./$(<F) --extended $(filter-out $(<F), $(^F))
-```
-
-These are the arguments that have been passed to `createimage`:
-
-1.  `$(ELF_CREATEIMAGE)`: This is `build/createimage`.
-2.  `$(ELF_BOOT)`: This is `build/bootblock`.
-3.  `$(ELF_MAIN)`: This is `build/main`.
-4.  `$(ELF_USER)`: This is derived from `$(wildcard $(DIR_TEST_PROJ)/*.c)`.
-    *   `DIR_TEST_PROJ` is `test/test_project1`.
-    *   Looking at the folder structure, `test/test_project1` contains: `2048.c`, `auipc.c`, `bss.c`, `data.c`.
-    *   So, `$(ELF_USER)` will expand to `build/2048 build/auipc build/bss build/data`.
-
-The command executed for the `image` target effectively becomes:
-`cd build && ./createimage --extended bootblock main 2048 auipc bss data`
-
-Counting the files passed to `createimage` (excluding the `--extended` option):
-*   `bootblock` (1)
-*   `main` (1)
-*   `2048` (1)
-*   `auipc` (1)
-*   `bss` (1)
-*   `data` (1)
-
-Total number of files (`nfiles` in `create_image`) is 6.
-
-In `createimage.c`, `tasknum` is calculated as `nfiles - 2`.
-So, `tasknum = 6 - 2 = 4`.
-
-This is what we're expecting, meaning that we've implemented `createimage.c` successfully. 
-
-Next, we're going to implement a more beautiful print message. First, we define `itoa` in `string.c` and declare the function in `string.h`:
-
-```C
-// implement a simple itoa function to print loaded task num
-char *itoa(int value, char *buffer, int base) {
-    if (base != 10 || value > INT32_MAX)
-        return NULL;
-    if (value == 0) {
-        *(buffer) = '0';
-        *(buffer + 1) = '\0';
-        return buffer;
-    }
-    char temp_buf[32];
-    int temp_ptr = 31;
-    while (value > 0) {
-        temp_buf[temp_ptr] = value % base + '0';
-        value = value / base;
-        temp_ptr--;
-    }
-    temp_ptr++;
-    char *copy_ptr = buffer;
-    while (temp_ptr < 32) {
-        *copy_ptr = temp_buf[temp_ptr];
-        copy_ptr++;
-        temp_ptr++;
-    }
-    *(copy_ptr) = '\0';
-    return buffer;
-}
-```
-
-We can also define some useful coloring macros in `string.h`:
-
-```C
-// formatting
-#define ANSI_FG_BLACK "\33[1;30m"
-#define ANSI_FG_RED "\33[1;31m"
-#define ANSI_FG_GREEN "\33[1;32m"
-#define ANSI_FG_YELLOW "\33[1;33m"
-#define ANSI_FG_BLUE "\33[1;34m"
-#define ANSI_FG_MAGENTA "\33[1;35m"
-#define ANSI_FG_CYAN "\33[1;36m"
-#define ANSI_FG_WHITE "\33[1;37m"
-#define ANSI_BG_BLACK "\33[1;40m"
-#define ANSI_BG_RED "\33[1;41m"
-#define ANSI_BG_GREEN "\33[1;42m"
-#define ANSI_BG_YELLOW "\33[1;43m"
-#define ANSI_BG_BLUE "\33[1;44m"
-#define ANSI_BG_MAGENTA "\33[1;45m"
-#define ANSI_BG_CYAN "\33[1;46m"
-#define ANSI_BG_WHITE "\33[1;47m"
-#define ANSI_NONE "\33[0m"
-
-// macro stringizing
-#define str_temp(x) #x
-#define str(x) str_temp(x)
-#define ANSI_FMT(str, fmt) fmt str ANSI_NONE
-```
-
-Then, we can produce beautiful coloring messages in `main.c`, like task number printing:
-
-```C
-    int tasknum = *((short *)TASK_NUM_LOC);
-    char temp_buf[] = "_____";
-    char *tasknum_buf = itoa(tasknum, temp_buf, 10);
-
-    // Construct the message with color
-    bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE) ANSI_FMT("Loaded ", ANSI_FG_GREEN));
-    bios_putstr(ANSI_FG_CYAN);
-    bios_putstr(tasknum_buf);
-    bios_putstr(ANSI_NONE);
-    bios_putstr(ANSI_FMT(" tasks.", ANSI_FG_GREEN));
-```
-
-Next, we'll implement an interactive user input interface, to allow users input the task that they want to execute:
-
-```C
-    // Prompt the user to input the task that he want to execute
-    bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE));
-    bios_putstr(ANSI_FMT("Please enter the task to execute: \n", ANSI_FG_YELLOW));
-    bios_putstr(ANSI_FMT("~> ", ANSI_FG_CYAN));
-
-
-    // Use BIOS API to read characters from console and echoes back ( •̀ ω •́ )✧)
-    int task_idx = 0;
-    char temp_task_idx_buf[] = "_____";
-    char *exec_task_idx_buf;
-    while (1) {
-        char input = bios_getchar();
-        if (input == '\n' || input == '\r') {
-            bios_putchar('\n');
-            bios_putchar('\r');
-            if (task_idx >= tasknum || task_idx < 0) {
-                // Prompt the user to input the task that he want to execute
-                bios_putstr(ANSI_FMT("ERROR: Invalid task index", ANSI_BG_RED));
-                bios_putstr(ANSI_FMT("\n\rInfo: ", ANSI_FG_BLUE));
-                bios_putstr(ANSI_FMT("Please enter the task to execute: \n", ANSI_FG_YELLOW));
-                bios_putstr(ANSI_FMT("~> ", ANSI_FG_CYAN));
-                task_idx = 0;
-                continue;
-            }
-            exec_task_idx_buf = itoa(task_idx, temp_task_idx_buf, 10);
-            break;
-        }
-        if (input != 0xFF) {
-            task_idx *= 10;
-            task_idx += input - '0';
-            bios_putchar(input);
-        }
-    }
-
-    // Print success message
-    bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE) ANSI_FMT("Now executing task ", ANSI_FG_GREEN));
-    bios_putstr(ANSI_FG_CYAN);
-    bios_putstr(exec_task_idx_buf);
-    bios_putstr(ANSI_NONE);
-    bios_putstr(ANSI_FMT("\n", ANSI_FG_GREEN));
-```
-
-### Revising `task_info_t` and Enabling Detecting Tasks by Name
-
-We shall include the `name` property in `task_info_t`, as follows:
-
-```C
-/* TODO: [p1-task4] implement your own task_info_t! */
-typedef struct {
-    char name[MAX_NAME_LEN];
-    uint16_t start_sector;
-    uint16_t size;
-} task_info_t;
-```
-
-When initializing task info in the main function, we should copy the `task_info` array that has been written to the first 512 Bytes of RAM to the array that we define in `main.c`:
-
-```C
-static void init_task_info(void)
-{
-    // TODO: [p1-task4] Init 'tasks' array via reading app-info sector
-    // NOTE: You need to get some related arguments from bootblock first
-    int tasknum = *(uint16_t *)TASK_NUM_LOC;
+    /* TODO: [p2-task1] load needed tasks and init their corresponding PCB */
+    ptr_t next_task_addr = TASK_MEM_BASE;
+    tasknum = *(short *)TASK_NUM_LOC; // Ensure tasknum is loaded
 
     for (int i = 0; i < tasknum; i++) {
-        // Read the task information from the specified memory location
-        tasks[i] = *(task_info_t *)(TASK_INFO_LOC + i * sizeof(task_info_t));
+        // Load the task into memory at the next available address
+        ptr_t entry_point = load_task_img(tasks[i].name, tasknum, next_task_addr);
+        
+        // Get a free PCB
+        pcb_t *new_pcb = &pcb[process_id];
 
-        // Conditional debug output block
-        if (DEBUG == 1) {
-            // Set the text color to green
-            bios_putstr(ANSI_FG_GREEN);
+        // Initialize the PCB
+        new_pcb->kernel_sp = allocKernelPage(1);
+        new_pcb->user_sp = allocUserPage(1);
+        new_pcb->pid = process_id++;
+        new_pcb->status = TASK_READY;
+        new_pcb->cursor_x = 0;
+        new_pcb->cursor_y = i; // Give each task its own line to start
 
-            // Print the debug message in parts
-            bios_putstr("DEBUG: task detected, '");
-            bios_putstr(tasks[i].name);
-            bios_putstr("'\n\r");
+        // Initialize the stack for the first run
+        init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, new_pcb);
 
-            // Reset the color back to default
-            bios_putstr(ANSI_NONE);
+        // Add the PCB to the ready queue
+        list_add_tail(&new_pcb->list, &ready_queue);
+
+        // Update the next available task address, page-aligned
+        next_task_addr += tasks[i].byte_size;
+        next_task_addr = (next_task_addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    }
+
+    /* TODO: [p2-task1] remember to initialize 'current_running' */
+    current_running = &pid0_pcb;
+}
+```
+
+### Add command line support for task 2.1
+
+We can add a command line handler to customize `ready_queue` for task 2.1. This function first initialize `ready_queue` base on the user's input, then `do_scheduler` will take over control to complete the scheduling process. The handler is as follows:
+
+```C
+int cmd_demo_2_1(char *args) {
+    // Check for empty arguments
+    if (args == NULL || *args == '\0') {
+        bios_putstr(ANSI_FMT("ERROR: Usage: demo_2_1 <task_name1> <task_name2> ...", ANSI_BG_RED));
+        bios_putstr(ANSI_FMT("\n\r", ANSI_NONE)); // Newline and reset color.
+        return 0;
+    }
+
+    // --- Tokenize the input arguments into individual task names ---
+    char parsed_names[MAX_BATCH_TASKS][MAX_NAME_LEN];
+    int num_parsed_tasks = tokenize_string(args, parsed_names, MAX_BATCH_TASKS);
+
+    if (num_parsed_tasks <= 0) {
+        bios_putstr(ANSI_FMT("ERROR: No tasks provided for demo.", ANSI_BG_RED));
+        bios_putstr(ANSI_FMT("\n\r", ANSI_NONE));
+        return 0;
+    }
+
+    // --- Initialize PCBs and add them to the ready_queue ---
+    list_init(&ready_queue); // the list initialized in main.c shall be invalidated
+    ptr_t next_task_addr = TASK_MEM_BASE;
+    for (int i = 0; i < num_parsed_tasks; ++i) {
+        int task_idx = search_task_name(tasknum, parsed_names[i]);
+        if (task_idx == -1) {
+            bios_putstr(ANSI_FMT("ERROR: Invalid task name in arguments: ", ANSI_BG_RED));
+            bios_putstr(parsed_names[i]);
+            bios_putstr(ANSI_FMT("\n\r", ANSI_NONE));
+            return 0; // Abort
         }
 
+        // Get a free PCB
+        pcb_t *new_pcb = &pcb[process_id];
+
+        // Load the task into memory
+        ptr_t entry_point = load_task_img(tasks[task_idx].name, tasknum, next_task_addr);
+
+        // Initialize the PCB
+        new_pcb->kernel_sp = allocKernelPage(1);
+        new_pcb->user_sp = allocUserPage(1);
+        new_pcb->pid = process_id++;
+        new_pcb->status = TASK_READY;
+        new_pcb->cursor_x = 0;
+        new_pcb->cursor_y = i; // Give each task its own line
+
+        // Initialize the fake context on the stack
+        init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, new_pcb);
+
+        // Add the initialized PCB to the ready queue
+        list_add_tail(&new_pcb->list, &ready_queue);
+
+        // Update the next available task address, page-aligned
+        next_task_addr += tasks[task_idx].byte_size;
+        next_task_addr = (next_task_addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
     }
-}
-```
+    
+    bios_putstr(ANSI_FMT("Info: Starting scheduler...\n\r", ANSI_FG_GREEN));
 
-A helper function is defined to match task name:
+    // Enough newlines to clear the screen
+    // (don't know how to utilize screen_clear and screen_reflush API)
+    bios_putstr("\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r");
+    bios_putstr("\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r");
+    bios_putstr("\n\r\n\r\n\r");
+    screen_clear();
+    screen_reflush();
 
-```C
-static int search_task_name(int tasknum, char name[]) {
-    for (int i = 0; i < tasknum; i++) {
-        if (strcmp(name, tasks[i].name) == 0)
-            return i;
-    }
-    return -1;
-}
-```
-
-The following function could recognize task on both index input or name input. When you input `1` or `auipc`, this function will always know the application that you want to execute:
-
-```C
-    // TODO: Load tasks by either task id [p1-task3] or task name [p1-task4],
-    //   and then execute them.
-
-    int tasknum = *((short *)TASK_NUM_LOC);
-    char temp_buf[] = "_____";
-    char *tasknum_buf = itoa(tasknum, temp_buf, 10);
-
-    // Construct the message with color
-    bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE) ANSI_FMT("Loaded ", ANSI_FG_GREEN));
-    bios_putstr(ANSI_FG_CYAN);
-    bios_putstr(tasknum_buf);
-    bios_putstr(ANSI_NONE);
-    bios_putstr(ANSI_FMT(" tasks.\n", ANSI_FG_GREEN));
-
-    // Prompt the user to input the task that he want to execute
-    bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE));
-    bios_putstr(ANSI_FMT("Please enter the task to execute: \n", ANSI_FG_YELLOW));
-    bios_putstr(ANSI_FMT("~> ", ANSI_FG_CYAN));
-
-
-    // Use BIOS API to read characters from console and echoes back ( •̀ ω •́ )✧)
-    int task_idx = 0;
-    char temp_task_idx_buf[] = "_____";
-    char temp_task_name_buf[32];
-    int task_name_buf_ptr = 0;
-    char *exec_task_idx_buf;
+    // --- do_scheduler takes over control ---
     while (1) {
-        char input = bios_getchar();
-        if (input == '\n' || input == '\r') {
-            bios_putchar('\n');
-            bios_putchar('\r');
-            temp_task_name_buf[task_name_buf_ptr] = '\0';
-            int task_idx_by_name = search_task_name(tasknum, temp_task_name_buf);
-            if (task_idx_by_name != -1) {
-                task_idx = task_idx_by_name;
-                exec_task_idx_buf = itoa(task_idx, temp_task_idx_buf, 10);
-                break;
-            } else if (task_idx >= tasknum || task_idx < 0) {
-                // Prompt the user to input the task that he want to execute
-                bios_putstr(ANSI_FMT("ERROR: Invalid task index or name", ANSI_BG_RED));
-                bios_putstr(ANSI_FMT("\n\rInfo: ", ANSI_FG_BLUE));
-                bios_putstr(ANSI_FMT("Please enter the task to execute: \n", ANSI_FG_YELLOW));
-                bios_putstr(ANSI_FMT("~> ", ANSI_FG_CYAN));
-
-                // reset index and name buf pointer
-                task_idx = 0;
-                task_name_buf_ptr = 0;
-                continue;
-            } else {
-                exec_task_idx_buf = itoa(task_idx, temp_task_idx_buf, 10);
-                break;
-            }
-        }
-        if (input != 0xFF) {
-            task_idx *= 10;
-            task_idx += input - '0';
-            temp_task_name_buf[task_name_buf_ptr++] = input;
-            bios_putchar(input);
-        }
+        do_scheduler();
     }
 
-    // Print success message
-    bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE) ANSI_FMT("Now executing task ", ANSI_FG_GREEN));
-    bios_putstr(ANSI_FG_CYAN);
-    bios_putstr(exec_task_idx_buf);
-    bios_putstr(", ");
-    bios_putstr(tasks[task_idx].name);
-    bios_putstr(ANSI_NONE);
-    bios_putstr(ANSI_FMT("\n", ANSI_FG_GREEN));
-```
-
-The next task is to enable compact arrangement of the image file, and loading the user specified application correctly. 
-
-For this task, we should first add some fields to `task_info_t` to provide necessary info for the loader:
-
-```C
-typedef struct {
-    char name[MAX_NAME_LEN];
-    uint16_t start_sector;
-    uint16_t size;
-    uint32_t byte_offset;
-    uint32_t byte_size;
-} task_info_t;
-```
-
-We shall modify the `create_image` loop to fill in these information:
-
-```C
-/* TODO: [p1-task4] assign your task_info_t somewhere in 'create_image' */
-static void create_image(int nfiles, char *files[])
-{
-    int tasknum = nfiles - 2;
-    int nbytes_kernel = 0;
-    int nbytes_application = 0;
-    int phyaddr = 0;
-    FILE *fp = NULL, *img = NULL;
-    Elf64_Ehdr ehdr;
-    Elf64_Phdr phdr;
-
-    /* open the image file */
-    img = fopen(IMAGE_FILE, "w");
-    assert(img != NULL);
-
-    /* for each input file */
-    for (int fidx = 0; fidx < nfiles; ++fidx) {
-
-        int taskidx = fidx - 2;
-        int phyaddr_start_of_file = phyaddr;
-        nbytes_application = 0;
-
-        /* open input file */
-        fp = fopen(*files, "r");
-        assert(fp != NULL);
-
-        /* read ELF header */
-        read_ehdr(&ehdr, fp);
-        printf("0x%04lx: %s\n", ehdr.e_entry, *files);
-
-        /* for each program header */
-        for (int ph = 0; ph < ehdr.e_phnum; ph++) {
-
-            /* read program header */
-            read_phdr(&phdr, fp, ph, ehdr);
-
-            if (phdr.p_type != PT_LOAD) continue;
-
-            /* write segment to the image */
-            write_segment(phdr, fp, img, &phyaddr);
-
-            /* update nbytes_kernel */
-            if (strcmp(*files, "main") == 0) {
-                nbytes_kernel += get_filesz(phdr);
-            }
-
-            /* update nbytes_application */
-            if (strcmp(*files, "main") != 0 && strcmp(*files, "bootblock") != 0) {
-                nbytes_application += get_filesz(phdr);
-            }
-        }
-
-        // write info into taskinfo[tasknum] struct
-        if (taskidx >= 0) {
-            strncpy(taskinfo[taskidx].name, *files, MAX_NAME_LEN);
-            taskinfo[taskidx].name[MAX_NAME_LEN - 1] = '\0';
-            taskinfo[taskidx].size = NBYTES2SEC(nbytes_application),
-            taskinfo[taskidx].start_sector = phyaddr_start_of_file / SECTOR_SIZE;
-            taskinfo[taskidx].byte_offset = phyaddr_start_of_file;
-            taskinfo[taskidx].byte_size = nbytes_application;
-        }
-
-        /* write padding bytes */
-        /**
-         * TODO:
-         * 1. [p1-task3] do padding so that the kernel and every app program
-         *  occupies the same number of sectors
-         * 2. [p1-task4] only padding bootblock is allowed!
-         */
-
-        // write paddings for bootblock
-        if (strcmp(*files, "bootblock") == 0) {
-            write_padding(img, &phyaddr, SECTOR_SIZE);
-        }
-
-        // write paddings for kernel
-        // if (strcmp(*files, "main") == 0) {
-        //     write_padding(img, &phyaddr, (1 + FIXED_KERNEL_SECTORS) * SECTOR_SIZE);
-        // }
- 
-        // write paddings for tasks
-        // if (strcmp(*files, "main") != 0 && strcmp(*files, "bootblock") != 0) {
-        //    write_padding(img, &phyaddr, (1 + FIXED_KERNEL_SECTORS + (taskidx + 1) * FIXED_APP_SECTORS) * SECTOR_SIZE);
-        // }
-
-        fclose(fp);
-        files++;
-    }
-    write_img_info(nbytes_kernel, taskinfo, tasknum, img);
-
-    fclose(img);
+    return 0;
 }
 ```
 
-Then, we should implement `loader.c`, allowing the main function to load the specified application into the RAM area begins with `TASK_MEM_BASE`:
+### Modifying `load_task_img`
+
+Since in this task, we are going to load all tasks at one time, so we should enable `load_task_img` to load tasks into differernt memory location, as follows:
 
 ```C
-uint64_t load_task_img(char *name, int tasknum)
+uint64_t load_task_img(char *name, int tasknum, ptr_t dest_addr)
 {
     /**
      * TODO:
      * 1. [p1-task3] load task from image via task id, and return its entrypoint
      * 2. [p1-task4] load task via task name, thus the arg should be 'char *taskname'
      */
-    task_info_t task = tasks[search_task_name(tasknum, name)];
-    sd_read((uintptr_t)temp_load_buffer, task.size, task.start_sector);
-    uint32_t offset_in_buffer = task.byte_offset % SECTOR_SIZE;
-    memcpy((void *)TASK_MEM_BASE, (void *)temp_load_buffer + offset_in_buffer, task.byte_size);
+
+    // read content from sd card and copy the content to memory base on offset
+    int task_idx = search_task_name(tasknum, name);
+    task_info_t *task = &tasks[task_idx];
+    sd_read((uintptr_t)temp_load_buffer, task->size + 1, task->start_sector);
+    uint32_t offset_in_buffer = task->byte_offset % SECTOR_SIZE;
+    memcpy((void *)dest_addr, (void *)temp_load_buffer + offset_in_buffer, task->byte_size);
 
     // Conditional debug output block
     if (DEBUG == 1) {
@@ -806,8 +184,8 @@ uint64_t load_task_img(char *name, int tasknum)
         bios_putstr("'. First bytes in memory:\n\r  "); // Indent the hex output
 
         // Determine how many bytes to print (up to a max of 16 for a brief summary)
-        int bytes_to_print = (task.byte_size > 16) ? 16 : task.byte_size;
-        uint8_t *mem_ptr = (uint8_t *)TASK_MEM_BASE;
+        int bytes_to_print = (task->byte_size > 16) ? 16 : task->byte_size;
+        uint8_t *mem_ptr = (uint8_t *)dest_addr;
 
         // Loop through the bytes and print each one in hex
         for (int i = 0; i < bytes_to_print; i++) {
@@ -816,11 +194,11 @@ uint64_t load_task_img(char *name, int tasknum)
         }
 
         // as it would be redundant for smaller files.
-        if (task.byte_size > 16) {
+        if (task->byte_size > 16) {
             bios_putstr("\n\r  Last bytes in memory:\n\r  ");
 
             // Point to the start of the last 16 bytes
-            uint8_t *last_mem_ptr = (uint8_t *)TASK_MEM_BASE + task.byte_size - 16;
+            uint8_t *last_mem_ptr = (uint8_t *)dest_addr + task->byte_size - 16;
 
             // Loop through the last 16 bytes and print each one in hex
             for (int i = 0; i < 16; i++) {
@@ -835,1148 +213,1329 @@ uint64_t load_task_img(char *name, int tasknum)
         bios_putstr(ANSI_NONE);
     }
 
-    return TASK_MEM_BASE;
+    // FENCE.I ensures that the instruction fetch pipeline sees the
+    // recently written data (our new code).
+    asm volatile ("fence.i" ::: "memory");
+
+    return dest_addr;
 }
 ```
 
-Note, here a helper function `bios_puthex_byte` is defined to print bytes as debug info:
+### Implementing `init_pcb_stack`
+
+We should implement `init_pcb_stack` to create a "fake" `switch_to` context on the kernel stack of each new process. This ensures that when the scheduler switches to the task for the first time, it correctly "returns" to the task's entry point.
 
 ```C
-/**
- * @brief Prints a single byte as a two-digit hexadecimal value.
- *
- * @param byte The byte to print.
- */
-static inline void bios_puthex_byte(uint8_t byte)
+void init_pcb_stack(
+    ptr_t kernel_stack, ptr_t user_stack, ptr_t entry_point,
+    pcb_t *pcb)
 {
-    // A lookup table for hexadecimal characters
-    const char hex_chars[] = "0123456789abcdef";
-    // Print the high nibble (first 4 bits)
-    bios_putchar(hex_chars[(byte >> 4) & 0x0F]);
-    // Print the low nibble (last 4 bits)
-    bios_putchar(hex_chars[byte & 0x0F]);
+    /* TODO: [p2-task3] initialization of registers on kernel stack
+     * HINT: sp, ra, sepc, sstatus
+     * NOTE: To run the task in user mode, you should set corresponding bits
+     *     of sstatus(SPP, SPIE, etc.).
+     */
+    regs_context_t *pt_regs = (regs_context_t *)(kernel_stack - sizeof(regs_context_t));
+
+    /* TODO: [p2-task1] set sp to simulate just returning from switch_to
+     * NOTE: you should prepare a stack, and push some values to
+     * simulate a callee-saved context.
+     */
+    switchto_context_t *pt_switchto =
+        (switchto_context_t *)((ptr_t)pt_regs - sizeof(switchto_context_t));
+    
+    // Set the `ra` (return address) register in our fake context to the task's entry point.
+    pt_switchto->regs[0] = entry_point; // ra
+
+    // Set the `sp` (stack pointer) for the new task.
+    // The stack pointer should point to the base of our fake context.
+    pt_switchto->regs[1] = (reg_t)pt_switchto; // sp
+
+    // Update the PCB's kernel_sp to point to this fake context.
+    pcb->kernel_sp = (reg_t)pt_switchto;
+    pcb->user_sp = user_stack;
 }
 ```
 
-### Implementing `crt0.S`
+> [!Note] About the Fake Context
+> Why do we need a fake context? When we want to switch from kernel to our user functions, the user function itself does not have a context (like the current content in the register). So we have to create a context for them, so that when the user application resumes this context, the effect is same as if the function had been called through a normal function call mechanism. So the `ra` in the context shall be set to the entry point of the user function.
 
-`crt0.S` is used for setting up C runtime environment for user programs, including clearing `bss` section, entering user `main` function, and returning to the kernel after the task has finished. The implementation of this file is as follows:
+### Implementing the `do_scheduler` function
+
+This function inserts the next user application after the head of the `ready_queue`, and performs the `switch_to` function
 
 ```C
-#include <asm.h>
-#define USER_STACKPTR     0x52010000
-#define TASK_MEM_BASE     0x52000000
-#define KERNEL_ENTRYPOINT 0x50201000
-
-.section ".entry_function","ax"
-ENTRY(_start)
-
-    /* TODO: [p1-task3] setup C runtime environment for the user program */
-
-    la a0, __bss_start
-    la a1, __BSS_END__
-
-    clear_bss_loop_start:
-
-    sw zero, (a0)
-    addi a0, a0, 4
-    blt a0, a1, clear_bss_loop_start
-
-    li sp, USER_STACKPTR
-
-    /* TODO: [p1-task3] enter main function */
-
-    la a0, main
-    jalr a0
-
-
-    /* TODO: [p1-task3] finish task and return to the kernel, replace this in p3-task2! */
-    li t0, KERNEL_ENTRYPOINT
-    jr t0
+void do_scheduler(void)
+{
+    // TODO: [p2-task3] Check sleep queue to wake up PCBs
 
     /************************************************************/
-	/* Do not touch this comment. Reserved for future projects. */
-	/************************************************************/
-// while(1) loop, unreachable here
-loop:
-    wfi
-    j loop
+    /* Do not touch this comment. Reserved for future projects. */
+    /************************************************************/
 
-END(_start)
-```
+    // [p2-task1] Modify the current_running pointer.
+    pcb_t *prev_running = current_running;
+    pcb_t *next_running;
 
-> [!Note] The Use of `jr` and `jalr`
-> We use these two command here because the jump distance is quite far. If we simply use `j` and `jal`, we'll receive the following error:
-
-```C
-./build/crt0.o: in function `clear_bss_loop_start':
-/home/stu/hanchuxiao23/arch/riscv/crt0/crt0.S:25:(.entry_function+0x28): relocation truncated to fit: R_RISCV_JAL against `*UND*'
-collect2: error: ld returned 1 exit status
-make: *** [Makefile:150: build/2048] Error 1
-```
-
-### Modifying `sd_read` logic
-
-After implementing all the relevant functions, when I executed task 2, `bss`, I encountered the following problem: 
-
-```
-[U-BOOT] ERROR: truly_illegal_insn
-exception code: 2 , Illegal instruction , epc 52000054 , ra 52000028
-### ERROR ### Please RESET the board ###
-```
-
-And GDB shows the following information:
-
-```
-(gdb) x/20i 0x5200002e
-   0x5200002e:  wfi
-   0x52000032:  j       0x5200002e
-   0x52000034:  nop
-   0x52000036:  addi    sp,sp,-16
-   0x52000038:  sd      ra,8(sp)
-   0x5200003a:  auipc   a5,0x0
-   0x5200003e:  addi    a5,a5,254
-   0x52000042:  auipc   a3,0x0
-   0x52000046:  addi    a3,a3,296
-   0x5200004a:  j       0x52000050
-   0x5200004c:  beq     a5,a3,0x52000066
-   0x52000050:  lbu     a4,0(a5)
-=> 0x52000054:  unimp
-   0x52000056:  unimp
-   0x52000058:  unimp
-   0x5200005a:  unimp
-   0x5200005c:  unimp
-   0x5200005e:  unimp
-   0x52000060:  unimp
-   0x52000062:  unimp
-```
-
-The content above the problematic part is the same as the disassembly file, however, the RAM area below 0x52000054 shows `unimp`. Then, I suspect that the user application hasn't been completely copied. And I find the following issue:
-
-I used this in my original code:
-
-```C
-    sd_read((uintptr_t)temp_load_buffer, task.size, task.start_sector);
-```
-
-However, this approach cannot face the following situation:
-
-If a program is less than 1 sector in total, but half of it is on sector 17, another half is on sector 18 (like `bss`), as shown in the following situation:
-
-```
-+----------+-----+-----+----------+----------------+----------------+
-|          |     |     |          |                |                |
-|       17 |  PROGRAM  | 18       |       19       |       20       |      
-|          |     |     |          |                |                |
-+----------+-----+-----+----------+----------------+----------------+
-```
-
-Then, the code above will only copy the part from the 17th sector. That's something we don't want, so we modify it into the following code:
-
-```C
-    sd_read((uintptr_t)temp_load_buffer, task.size + 1, task.start_sector);
-```
-
-## Task 5
-
-### Wrap up existing functions
-
-Before we implement task name printing, we're going to wrap up existing `user_input_and_launch_task` function into a handler: 
-
-```C
-uint64_t user_input_and_launch_task_handler(int tasknum) {
-    // Prompt the user to input the task that he want to execute
-    bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE));
-    bios_putstr(ANSI_FMT("Please enter the task to execute: \n", ANSI_FG_YELLOW));
-    bios_putstr(ANSI_FMT("~> ", ANSI_FG_CYAN));
-
-
-    // Use BIOS API to read characters from console and echoes back ( •̀ ω •́ )✧)
-    int task_idx = 0;
-    char temp_task_idx_buf[] = "_____";
-    char temp_task_name_buf[32];
-    int task_name_buf_ptr = 0;
-    char *exec_task_idx_buf;
-    while (1) {
-        char input = bios_getchar();
-        if (input == '\n' || input == '\r') {
-            bios_putchar('\n');
-            bios_putchar('\r');
-            temp_task_name_buf[task_name_buf_ptr] = '\0';
-            int task_idx_by_name = search_task_name(tasknum, temp_task_name_buf);
-            if (task_idx_by_name != -1) {
-                task_idx = task_idx_by_name;
-                exec_task_idx_buf = itoa(task_idx, temp_task_idx_buf, 10);
-                break;
-            } else if (task_idx >= tasknum || task_idx < 0) {
-                // Prompt the user to input the task that he want to execute
-                bios_putstr(ANSI_FMT("ERROR: Invalid task index or name", ANSI_BG_RED));
-                bios_putstr(ANSI_FMT("\n\rInfo: ", ANSI_FG_BLUE));
-                bios_putstr(ANSI_FMT("Please enter the task to execute: \n", ANSI_FG_YELLOW));
-                bios_putstr(ANSI_FMT("~> ", ANSI_FG_CYAN));
-
-                // reset index and name buf pointer
-                task_idx = 0;
-                task_name_buf_ptr = 0;
-                continue;
-            } else {
-                exec_task_idx_buf = itoa(task_idx, temp_task_idx_buf, 10);
-                break;
-            }
-        }
-        if (input != 0xFF) {
-            task_idx *= 10;
-            task_idx += input - '0';
-            temp_task_name_buf[task_name_buf_ptr++] = input;
-            bios_putchar(input);
-        }
+    if (prev_running->status == TASK_RUNNING) {
+        prev_running->status = TASK_READY;
+        list_add_tail(&prev_running->list, &ready_queue);
     }
 
-    // Print success message
-    bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE) ANSI_FMT("Now executing task ", ANSI_FG_GREEN));
-    bios_putstr(ANSI_FG_CYAN);
-    bios_putstr(exec_task_idx_buf);
-    bios_putstr(", ");
-    bios_putstr(tasks[task_idx].name);
-    bios_putstr(ANSI_NONE);
-    bios_putstr(ANSI_FMT("\n", ANSI_FG_GREEN));
+    if (!list_is_empty(&ready_queue)) {
+        // Dequeue the next task from the ready queue
+        next_running = list_entry(ready_queue.next, pcb_t, list);
+        list_del(ready_queue.next);
+    } else {
+        // If the ready queue is empty, schedule the idle process
+        next_running = &pid0_pcb;
+    }
 
-    // Print success message
-    bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE) ANSI_FMT("Windows is loading files...\n\r", ANSI_FG_GREEN));
-    uint64_t entry_point = load_task_img(tasks[task_idx].name, tasknum);
+    current_running = next_running;
+    current_running->status = TASK_RUNNING;
 
-    // enter the entry point
-    bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE) ANSI_FMT("Starting task...\n\r", ANSI_FG_GREEN));
-    ((void (*)(void))entry_point)();
+    // [p2-task1] switch_to current_running
+    switch_to(prev_running, current_running);
+}
+```
 
+### Creating List APIs
+
+In the previous implementations, we have performed some list operations. We have to create these list APIs in `list.c` (newly created) and `list.h`, these APIs are as follows:
+
+**In `list.h`:**
+
+```C
+// Get the struct for this entry
+#define list_entry(ptr, type, member) \
+    ((type *)((char *)(ptr) - (unsigned long)(&((type *)0)->member)))
+
+void list_init(list_node_t *list);
+void list_add(list_node_t *new, list_node_t *head);
+void list_add_tail(list_node_t *new, list_node_t *head);
+void list_del(list_node_t *entry);
+
+static inline int list_is_empty(const list_head *head)
+{
+    return head->next == head;
+}
+```
+
+**In `list.c`:**
+
+```C
+#include <os/list.h>
+
+// initialize a list head
+void list_init(list_node_t *list)
+{
+    list->next = list;
+    list->prev = list;
+}
+
+// add a new entry
+static void __list_add(list_node_t *new, list_node_t *prev, list_node_t *next)
+{
+    next->prev = new;
+    new->next = next;
+    new->prev = prev;
+    prev->next = new;
+}
+
+// add a new entry after the specified head
+void list_add(list_node_t *new, list_node_t *head)
+{
+    __list_add(new, head, head->next);
+}
+
+// add a new entry before the specified head
+void list_add_tail(list_node_t *new, list_node_t *head)
+{
+    __list_add(new, head->prev, head);
+}
+
+// deletes entry from list
+static void __list_del(list_node_t * prev, list_node_t * next)
+{
+    next->prev = prev;
+    prev->next = next;
+}
+
+void list_del(list_node_t *entry)
+{
+    __list_del(entry->prev, entry->next);
+    entry->next = (void *) 0;
+    entry->prev = (void *) 0;
+}
+```
+
+### Modifying `crt0.S`
+
+We know that we've already set user stack while initializing the `PCB`s. However, after this initialization, the user application will first enter `crt0.S`, which, according to our code in Peoject 1, will set the user stack pointer again. So, we shall comment that line out:
+
+```nasm
+    // li sp, USER_STACKPTR
+```
+
+## Task 2
+
+### Implementing `do_block` and `do_unblock`
+
+The implementation of the two functions are as follows:
+
+```C
+// In sched.c
+
+void do_block(list_node_t *pcb_node, list_head *queue)
+{
+    // TODO: [p2-task2] block the pcb task into the block queue
+
+    // queue shall be the blocked queue
+    pcb_t *pcb = list_entry(pcb_node, pcb_t, list);
+    pcb->status = TASK_BLOCKED;
+    list_add_tail(pcb_node, queue);
+
+    // call the scheduler to run a different task
+    do_scheduler();
+}
+
+void do_unblock(list_node_t *pcb_node)
+{
+    // TODO: [p2-task2] unblock the `pcb` from the block queue
+
+    // set the pcb's status to TASK_READY
+    pcb_t *pcb = list_entry(pcb_node, pcb_t, list);
+    pcb->status = TASK_READY;
+ 
+    // delete the `pcb` from the block queue
+    list_del(pcb_node);
+
+    // Append the pcb node to the ready_queue
+    list_add_tail(pcb_node, &ready_queue);
+}
+```
+
+> [!Note] The Job of `do_unblock`
+> The job of `do_unblock` is just to delete the `pcb_node` from the block queue, so there is no need to call the scheduler again at the end of this function.
+
+### Implementing Lock Related Functions
+
+The spin clock are used to potect `mlocks` from racing conditions. Spin lock uses an atomic operation to acquire the lock, and enters a busy wait loop if the lock is currently unavailable.
+
+All the related functions are as follows:
+
+```C
+mutex_lock_t mlocks[LOCK_NUM];
+static spin_lock_t mlocks_lock;
+
+/* Initialize all locks */
+void init_locks(void)
+{
+    /* TODO: [p2-task2] initialize mlocks */
+    for (int i = 0; i < LOCK_NUM; i++) {
+        mlocks[i].key = -1; // indicates unused
+        spin_lock_init(&mlocks[i].lock);
+        list_init(&mlocks[i].block_queue);
+        mlocks[i].status = UNLOCKED;
+    }
+    spin_lock_init(&mlocks_lock);
+}
+
+/* Initialize spin lock */
+void spin_lock_init(spin_lock_t *lock)
+{
+    /* TODO: [p2-task2] initialize spin lock */
+    lock->status = UNLOCKED;
+}
+
+/* Try to acquire spin lock, unused */
+int spin_lock_try_acquire(spin_lock_t *lock)
+{
+    /* TODO: [p2-task2] try to acquire spin lock */
     return 0;
 }
-```
 
-However, this simple modification introduced a bug:
+/* Acquire spin lock */
+void spin_lock_acquire(spin_lock_t *lock)
+{
+    /* TODO: [p2-task2] acquire spin lock */
+    while (atomic_swap(LOCKED, (ptr_t)&lock->status) == LOCKED);
+}
 
-```
-Info: Windows is loading files...
-    blocks read error!
-    DEBUG: Loaded 'data'. First bytes in memory:
-	00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
-    Last bytes in memory:
-    00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
-    Info: Starting task...
-    [U-BOOT] ERROR: truly_illegal_insn
-    exception code: 2 , Illegal instruction , epc 52000000 , ra 
-    50201570
-    ### ERROR ### Please RESET the board ###
-```
+/* Release spin lock */
+void spin_lock_release(spin_lock_t *lock)
+{
+    /* TODO: [p2-task2] release spin lock */
+    atomic_swap(UNLOCKED, (ptr_t)&lock->status);
+}
 
-The `sd_read` doesn't work! However, for task `0`, `1` and `2`, it works pretty fine. And when I printed `task.size` and `task.start_sector` out, the error will disappear.
-
-> [!Warning]
-> This error is solved by removing the `+1` fix that we've just done!! I think this part will introduce some bugs in the future, but I currently don't have an idea about it.
-
-### Implementing Command Line Parsing Scheme
-
-To implement task listing and batch processing, we shall have a command line parsing scheme to deal with command line inputs efficiently, and should also have a better extensibility. The following is my implementation:
-
-Firstly, i defined a `cmd_table` to hold all valid commands and their handler:
-
-```C
-typedef struct {
-    char *name;
-    char *description;
-    int (*handler)(char *);
-} command_t;
-
-// Command table for all the available commands
-command_t cmd_table[] = {
-    {"help", "Display information about all supported commands", cmd_help},
-    {"ls", "List all loaded applications", cmd_ls},
-    {"exec", "Execute a task by name or ID", cmd_exec},
-    {"write_batch", "Write a batch processing sequence to image", cmd_write_batch},
-    {"exec_batch", "Execute the stored batch processing sequence", cmd_exec_batch}
-};
-```
-
-We define some helper functions:
-
-```C
 /**
- * @brief Search the command table based on given command name.
+ * @brief Initialize mutex lock with the given key
+ *
+ * @param key The key to identify the mutex lock
+ * @return The index of the initialized mutex lock
  */
-int search_command_table(char buf[]) {
-    for (int i = 0; i < NR_CMD; i++) {
-        if (strcmp(buf, cmd_table[i].name) == 0)
+int do_mutex_lock_init(int key)
+{
+    /* TODO: [p2-task2] initialize mutex lock */
+    spin_lock_acquire(&mlocks_lock);
+
+    // Check if a lock with this key already exists
+    for (int i = 0; i < LOCK_NUM; i++) {
+        if (mlocks[i].key == key) {
+            spin_lock_release(&mlocks_lock);
             return i;
-    }
-    return -1;
-}
-
-/**
- * Reads a line of input from the console.
- *
- * @param buffer   The character array to store the input.
- * @param max_len  The maximum number of characters to read (size of the buffer).
- * @return         0 on success.
- */
-static int read_line(char *buffer, int max_len) {
-    int ptr = 0;
-
-    while (1) {
-        // Read a single character from the BIOS/console
-        char input_char = bios_getchar();
-
-        // Check for Enter key (newline or carriage return)
-        if (input_char == '\n' || input_char == '\r') {
-            bios_putchar('\n');
-            bios_putchar('\r');
-            buffer[ptr] = '\0'; // Null-terminate the string
-            return 0;           // Success
-        }
-
-        // 0xFF typically means no character was available, so we ignore it
-        if (input_char != 0xFF) {
-            // Handle backspace
-            if (input_char == '\b' || input_char == 127) {
-                if (ptr > 0) {
-                    ptr--;
-                    // Erase the character from the screen
-                    bios_putchar('\b');
-                    bios_putchar(' ');
-                    bios_putchar('\b');
-                }
-            }
-            // Handle regular characters, ensuring no buffer overflow
-            else if (ptr < max_len - 1) {
-                buffer[ptr++] = input_char;
-                bios_putchar(input_char); // Echo the character back to the user
-            }
         }
     }
-}
 
-/**
- * @brief Helper function to tokenize a string into an array of strings.
- *
- * This function parses an input string `input_str` based on space and tab delimiters.
- * Each found token is copied into the `tokens` array.
- *
- * @param input_str The string to tokenize.
- * @param tokens A 2D char array to store the resulting tokens.
- * @param max_tokens The maximum number of tokens to extract.
- * @return The number of tokens found, or -1 on error (e.g., a token is too long).
- */
-static int tokenize_string(char *input_str, char tokens[][MAX_NAME_LEN], int max_tokens) {
-    int token_count = 0;
-    char *current_char = input_str;
-
-    // Handle null or empty input string gracefully
-    if (input_str == NULL || *input_str == '\0') {
-        return 0; // No tokens to parse
-    }
-
-    // --- Main tokenization loop ---
-    // Continue as long as we haven't reached the end of the string or the token limit
-    while (*current_char != '\0' && token_count < max_tokens) {
-        // 1. Skip any leading whitespace (spaces or tabs)
-        while (*current_char == ' ' || *current_char == '\t') {
-            current_char++;
-        }
-
-        // If we've reached the end of the string after skipping whitespace, exit
-        if (*current_char == '\0') {
+    // If not, find an unused lock to initialize
+    int free_idx = -1;
+    for (int i = 0; i < LOCK_NUM; i++) {
+        if (mlocks[i].key == -1) {
+            free_idx = i;
             break;
         }
-
-        // 2. Identify the start and length of the next token
-        char *token_start = current_char;
-        int token_len = 0;
-        // A token is a sequence of non-whitespace, non-null characters
-        while (*current_char != '\0' && *current_char != ' ' && *current_char != '\t') {
-            current_char++;
-            token_len++;
-        }
-
-        // 3. Copy the token into the output array
-        // Check for buffer overflow before copying
-        if (token_len >= MAX_NAME_LEN) {
-            bios_putstr(ANSI_FMT("ERROR: Task name too long for batch.", ANSI_BG_RED));
-            bios_putstr(ANSI_FMT("\n\r", ANSI_NONE)); // Newline and reset color.
-            return -1; // Indicate error
-        }
-
-        strncpy(tokens[token_count], token_start, token_len);
-        tokens[token_count][token_len] = '\0'; // Manually null-terminate the copied string
-        token_count++;
     }
-    return token_count;
+
+    if (free_idx != -1) {
+        mlocks[free_idx].key = key;
+    }
+
+    spin_lock_release(&mlocks_lock);
+    return free_idx;
 }
 
 /**
- * @brief Parses a buffer containing newline-separated task names into an array.
+ * @brief Acquire the mutex lock at the given index
  *
- * This function iterates through a character buffer, treating each line
- * (separated by '\n' or '\r') as a single task name.
- *
- * @param buffer The input character buffer read from the batch file.
- * @param tasks_array The 2D array to store the parsed task names.
- * @param max_tasks The maximum number of tasks to parse.
- * @return The number of tasks successfully parsed, or -1 on error.
+ * @param mlock_idx The index of the mutex lock to acquire
  */
-int parse_batch_file(char *buffer, char tasks_array[][MAX_NAME_LEN], int max_tasks) {
-    int task_count = 0;
-    char *current_char = buffer;
+void do_mutex_lock_acquire(int mlock_idx)
+{
+    /* TODO: [p2-task2] acquire mutex lock */
+    mutex_lock_t *lock = &mlocks[mlock_idx];
 
-    // Handle null or empty buffer
-    if (buffer == NULL || *buffer == '\0') {
-        return 0;
-    }
-
-    // Loop until the end of the buffer or the task limit is reached
-    while (*current_char != '\0' && task_count < max_tasks) {
-        // 1. Skip any leading newlines or carriage returns to find the start of a line
-        while (*current_char == '\n' || *current_char == '\r') {
-            current_char++;
-        }
-
-        // If we reached the end of the buffer after skipping newlines, stop
-        if (*current_char == '\0') {
-            break;
-        }
-
-        // 2. Identify the start and length of the task name on the current line
-        char *name_start = current_char;
-        int name_len = 0;
-        while (*current_char != '\0' && *current_char != '\n' && *current_char != '\r') {
-            current_char++;
-            name_len++;
-        }
-
-        // 3. Copy the task name into the output array
-        // Check for buffer overflow before copying
-        if (name_len >= MAX_NAME_LEN) {
-            bios_putstr(ANSI_FMT("ERROR: Task name in batch file too long.", ANSI_BG_RED));
-            bios_putstr(ANSI_FMT("\n\r", ANSI_NONE)); // Newline and reset color.
-            return -1; // Indicate error
-        }
-
-        strncpy(tasks_array[task_count], name_start, name_len);
-        tasks_array[task_count][name_len] = '\0'; // Manually null-terminate the string
-        task_count++;
-    }
-    return task_count;
-}
-
-```
-
-The main loop that is used to parse commands are as follows:
-
-```C
-/**
- * @brief Runs the main interactive command shell loop.
- */
-void run_command_loop() {
     while (1) {
-        // 1. Print prompt and read user input
-        bios_putstr(ANSI_FMT("(cmd) ", ANSI_FG_CYAN));
-        char temp_cmd_buf[32] = {0};
-        read_line(temp_cmd_buf, MAX_INPUT_LEN);
+        // Acquire the internal spinlock to check the mutex status safely
+        spin_lock_acquire(&lock->lock);
 
-        // 2. Parse the input buffer into a command and an argument string.
-        char * args = NULL;
-        int i = 0;
-        while (temp_cmd_buf[i] != '\0') {
-            if (temp_cmd_buf[i] == ' ') {
-                temp_cmd_buf[i] = '\0';
-                args = &temp_cmd_buf[i + 1];
-
-                // This handles inputs like "exec   2048" correctly.
-                while (*args == ' ') {
-                    args++;
-                }
-
-                if (*args == '\0') {
-                    args = NULL;
-                }
-
-                break;
-            }
-            i++;
-        }
-
-        // 3. Find and execute the corresponding command handler.
-        char *command = temp_cmd_buf;
-        int cmd_idx = search_command_table(command);
-        if (cmd_idx == -1) {
-            // Prompt the user to input the task that he want to execute
-            bios_putstr(ANSI_FMT("ERROR: Invalid command, try `help`...", ANSI_BG_RED));
-            bios_putstr(ANSI_FMT("\n\r", ANSI_NONE)); // Newline and reset color.
+        if (lock->status == UNLOCKED) {
+            // Lock is free, so we take it
+            lock->status = LOCKED;
+            spin_lock_release(&lock->lock);
+            break; // Exit the loop, we have the lock
         } else {
-            cmd_table[cmd_idx].handler(args);
+            // Lock is busy, so we must block
+            current_running->status = TASK_BLOCKED;
+            list_add_tail(&current_running->list, &lock->block_queue);
+
+            // Release the spinlock *before* sleeping
+            spin_lock_release(&lock->lock);
+            do_scheduler();
+
+            // When we wake up, loop back to try acquiring the lock again
+        }
+    }
+}
+
+/**
+ * @brief Release the mutex lock at the given index
+ *
+ * @param mlock_idx The index of the mutex lock to release
+ */
+void do_mutex_lock_release(int mlock_idx)
+{
+    /* TODO: [p2-task2] release mutex lock */
+    mutex_lock_t *lock = &mlocks[mlock_idx];
+    // protect muttex's metadata from racing condition
+    spin_lock_acquire(&lock->lock);
+    if (!list_is_empty(&lock->block_queue)) {
+        // Other tasks are waiting for the lock. Get the first one.
+        list_node_t *first_node = lock->block_queue.next;
+        pcb_t *first_waiting_pcb = list_entry(first_node, pcb_t, list);
+
+        // Unblock it, transferring lock ownership.
+        do_unblock(&first_waiting_pcb->list);
+    }
+
+    // No tasks are waiting, release the lock
+    lock->status = UNLOCKED;
+
+    // release spin lock before return
+    spin_lock_release(&lock->lock);
+}
+```
+
+To be clearer, this is the full execution flow when `lock1` and `lock2` are executed simultaneously:
+
+**1. Setup: Starting the Tasks**
+
+1.  **Command**: You run `demo_2_1 lock1 lock2` in the shell.
+2.  **`cmd_demo_2_1`**: This function in `init/cmd.c` is executed.
+    *   It parses the arguments "lock1" and "lock2".
+    *   It loops through these names and for each one:
+        *   It finds the corresponding `task_info_t` for the application.
+        *   It calls `load_task_img` to load the application's code into memory.
+        *   It allocates a new PCB (`pcb_t`) for the task.
+        *   It calls `init_pcb_stack` to set up the initial kernel and user stacks for the new task, preparing a "fake" context so the scheduler can switch to it for the first time.
+        *   Finally, it adds the new PCB to the `ready_queue`.
+3.  **Ready to Go**: At this point, both `lock1` and `lock2` are in the `TASK_READY` state and are waiting in the `ready_queue`. The system then starts the scheduler by calling `do_scheduler()`.
+
+**2. The Dance Begins: First Run and Lock Initialization**
+
+The scheduler is a simple round-robin. It picks the first task from the `ready_queue`. Let's assume the order is `lock1`, then `lock2`.
+
+**`lock1`'s First Turn:**
+1.  `do_scheduler` switches context to `lock1`. `lock1` begins executing its main function.
+2.  `sys_mutex_init(42)` is called. This is a syscall that jumps into the kernel's `do_mutex_lock_init` function.
+3.  `do_mutex_lock_init` sees that no lock with `key = 42` exists. It finds a free lock from the global `mlocks` array (let's say at index 0), sets its key to 42, and returns the index 0 as the handle. `lock1` now has `mutex_id = 0`.
+4.  `lock1` prints `> [TASK] Applying for a lock..`
+5.  `sys_yield()` is called. This tells the scheduler: "I'm done with my turn for now." `do_scheduler` is invoked, `lock1`'s PCB is put at the back of the `ready_queue`, and the next task is chosen.
+
+**`lock2`'s First Turn:**
+1.  `do_scheduler` switches context to `lock2`.
+2.  `sys_mutex_init(42)` is called. It jumps to `do_mutex_lock_init`.
+3.  This time, the function finds a lock with `key = 42` already exists at index 0. It simply returns the existing handle 0. Now both tasks know that `mutex_id = 0` refers to the same kernel-managed lock.
+4.  `lock2` prints `> [TASK] Applying for a lock..`
+5.  `sys_yield()` is called. `lock2` goes to the back of the `ready_queue`.
+
+**3. Contention: Acquiring and Blocking**
+
+**`lock1`'s Second Turn (Acquiring the Lock):**
+1.  The scheduler picks `lock1` again.
+2.  `sys_mutex_acquire(0)` is called, jumping to `do_mutex_lock_acquire`.
+3.  Inside `do_mutex_lock_acquire`, it checks `mlocks[0].status`. It's `UNLOCKED`.
+4.  Success! It atomically sets `mlocks[0].status = LOCKED` and returns.
+5.  `lock1` now owns the lock. It enters its for loop and prints `> [TASK] Has acquired lock and running.(0)`.
+6.  `sys_yield()` is called. `lock1` goes to the back of the `ready_queue`.
+
+**`lock2`'s Second Turn (Blocking):**
+1.  The scheduler picks `lock2`.
+2.  `sys_mutex_acquire(0)` is called, jumping to `do_mutex_lock_acquire`.
+3.  It checks `mlocks[0].status`. This time, it's `LOCKED`.
+4.  The `else` branch is taken:
+    *   `lock2`'s status is set to `TASK_BLOCKED`.
+    *   Its PCB is removed from the `ready_queue` and added to the `mlocks[0].block_queue`.
+    *   `do_scheduler()` is called directly from within the acquire function. This is the key part you asked about. Because `lock2` cannot proceed, it must give up the CPU. The scheduler is called to pick another task.
+5.  `lock2` is now sleeping in the lock's private waiting queue. It will not be scheduled again until it is unblocked.
+
+**4. Resolution: Releasing and Unblocking**
+
+The `ready_queue` now only contains `lock1`.
+
+**`lock1`'s Subsequent Turns:**
+1.  The scheduler has no choice but to run `lock1`.
+2.  `lock1` continues its for loop, printing its "running" message and yielding. Each time it yields, the scheduler just picks it right back up because it's the only ready task.
+3.  After the loop finishes, `lock1` prints `> [TASK] Has acquired lock and exited..`
+4.  `sys_mutex_release(0)` is called. This is where the magic happens.
+
+**Inside `do_mutex_lock_release` (The Fix):**
+1.  The function sees that `mlocks[0].block_queue` is not empty (it contains `lock2`).
+2.  It takes `lock2`'s PCB from the `block_queue` and calls `do_unblock`.
+3.  `do_unblock` changes `lock2`'s status back to `TASK_READY` and puts it back in the main `ready_queue`.
+4.  This is the critical fix we made: The function then sets `mlocks[0].status = UNLOCKED`. The lock is now free.
+5.  `lock1` returns from the syscall and calls `sys_yield()`.
+
+**5. The Cycle Repeats**
+
+1.  `lock1` is at the back of the `ready_queue`. `lock2` is now at the front.
+2.  The scheduler picks `lock2`.
+3.  `lock2` resumes execution exactly where it left off: inside `do_mutex_lock_acquire`, right after its call to `do_scheduler()`.
+4.  It loops back to the top of the `while(1)`. This time, when it checks `mlocks[0].status`, it finds it `UNLOCKED`.
+5.  It successfully acquires the lock, sets the status to `LOCKED`, and finally breaks out of the `while` loop.
+6.  `lock2` proceeds to its critical section, printing "Has acquired lock and running...".
+
+The two tasks will now safely alternate, with one always waiting in the `block_queue` while the other is in its critical section. This is the essence of mutual exclusion.
+
+## Task 3
+
+Here is the full execution process of task3:
+
+**Phase 1: Kernel Initialization**
+
+1.  **`main()` starts**: The kernel begins execution.
+2.  **`init_syscall()`**: You populate the `syscall` array, mapping numbers like `SYSCALL_YIELD` to kernel function addresses like `&do_scheduler`.
+3.  **`init_pcb()`**:
+    *   For each task (lock1, fly, etc.):
+    *   The task's code is loaded into memory.
+    *   A kernel stack and a user stack are allocated.
+    *   **`init_pcb_stack()`** is called. It creates a fake exception frame on the kernel stack. This frame is meticulously crafted to make it look like the task was already running in User Mode and was interrupted.
+        > `sepc` is set to the task's starting address.
+        >
+        > `sstatus` is set to return to User Mode with interrupts enabled.
+        >
+        > The user `sp` is set.
+        >
+        > The `switch_to` context's `ra` is set to `ret_from_exception`.
+    *   The new PCB is added to the `ready_queue`.
+4.  **`do_scheduler()`** is called: The main loop kicks off the scheduler for the first time.
+
+**Phase 2: The First Context Switch**
+
+1.  **`do_scheduler()`**:
+    *   It picks the first task (e.g., lock1) from the `ready_queue`.
+    *   It calls `switch_to(pid0_pcb, lock1_pcb)`.
+2.  **`switch_to()`**:
+    *   It saves the callee-saved registers for the current task (`pid0_pcb`).
+    *   It loads `lock1_pcb->kernel_sp` into the `sp` register. This now points to the fake `switch_to` context you created.
+    *   It restores the callee-saved registers from this fake context. The most important one is `ra`, which now holds the address of `ret_from_exception`.
+    *   `switch_to` executes a `ret` instruction. Instead of returning to `do_scheduler`, it jumps to `ret_from_exception`.
+
+**Phase 3: Starting the User Task**
+
+1.  **`ret_from_exception()`**:
+    *   It calls `RESTORE_CONTEXT`, which loads the registers from your fake exception frame.
+    *   It performs the final `csrrw sp, sscratch, sp` to switch to the user stack.
+    *   It executes `sret`.
+2.  **`sret` Hardware Magic**: The CPU hardware reads the restored CSRs:
+    *   It sees `sepc` points to the start of lock1's `main` function.
+    *   It sees `sstatus.SPP` is 0, so it changes the privilege level to User Mode.
+    *   It sees `sstatus.SPIE` is 1, so it re-enables interrupts.
+    *   It jumps to the address in `sepc`.
+3.  **User Code Runs**: `lock1` is now executing its own code, in User Mode, on its own stack.
+
+**Phase 4: The System Call**
+
+1.  **`sys_mutex_acquire()`**: The user task calls a C library function.
+2.  **`invoke_syscall()`**: This function in `tiny_libc` is called.
+    *   It puts the syscall number (`SYSCALL_LOCK_ACQ`) into register `a7`.
+    *   It puts the arguments (the mutex id) into `a0`.
+    *   It executes the `ecall` instruction.
+3.  **Trap!**: The CPU detects the `ecall` from User Mode. This is an exception.
+    *   The CPU automatically disables interrupts, saves the current PC (the instruction after `ecall`) into `sepc`, saves the current privilege mode, and switches to Supervisor Mode.
+    *   It jumps to the address stored in the `stvec` register, which is `exception_handler_entry`.
+
+**Phase 5: Kernel Handling and Return**
+
+1.  **`exception_handler_entry`**:
+    *   `SAVE_CONTEXT` runs, swapping to the kernel stack and saving all user registers onto it.
+    *   It sets `ra` to point to `ret_from_exception`.
+    *   It calls `interrupt_helper(context_ptr, stval, scause)`.
+2.  **`interrupt_helper()`**: It checks `scause`, sees it's a syscall, and calls `handle_syscall()`.
+3.  **`handle_syscall()`**:
+    *   It looks at the saved `a7` to identify the syscall number.
+    *   It finds `do_mutex_lock_acquire` in the `syscall` array.
+    *   It calls `do_mutex_lock_acquire()`, passing the saved `a0` as the argument.
+    *   `do_mutex_lock_acquire` runs. Let's say it blocks. It will call `do_scheduler()`, which will `switch_to` another task (like lock2). The process repeats from Phase 2 for the new task.
+4.  **Return Path**: Eventually, a syscall finishes without blocking.
+    *   `handle_syscall` gets the return value and writes it into the saved `a0` on the stack.
+    *   It increments the saved `sepc` by 4 to avoid re-executing the `ecall`.
+    *   All the C functions return, eventually returning to the address in `ra`, which is `ret_from_exception`.
+5.  **`ret_from_exception()`**: It restores the (now possibly modified) context, swaps back to the user stack, and executes `sret`.
+6.  **Back to User**: The user task resumes execution at the instruction right after the `ecall`, with the syscall's return value in its `a0` register, completely unaware of the complex dance that just happened.
+
+### Implementation Steps & Modifications:
+
+#### Trap Vector Setup (`trap.S`, `irq.c`):
+*   Implemented `setup_exception` in `trap.S` to write the address of `exception_handler_entry` into the `stvec` CSR, informing the CPU where to jump on an exception.
+
+```nasm
+// In trap.S
+ENTRY(setup_exception)
+
+  /* TODO: [p2-task3] save exception_handler_entry into STVEC */
+  la t0, exception_handler_entry
+  csrw stvec, t0
+
+  /* TODO: [p2-task4] enable interrupts globally */
+
+ENDPROC(setup_exception)
+```
+
+*   Ensured `setup_exception` is called from `init_exception` in `irq.c`.
+
+```C
+// In irq.c
+void init_exception()
+{
+    /* TODO: [p2-task3] initialize exc_table */
+    /* NOTE: handle_syscall, handle_other, etc.*/
+    exc_table[EXCC_SYSCALL] = (handler_t)&handle_syscall;
+
+    /* TODO: [p2-task4] initialize irq_table */
+    /* NOTE: handle_int, handle_other, etc.*/
+
+    /* TODO: [p2-task3] set up the entrypoint of exceptions */
+    setup_exception();
+}
+```
+
+#### Exception Entry (`entry.S`):
+*   **`SAVE_CONTEXT` Macro:** Implemented to perform the critical task of switching from the user stack to a dedicated kernel stack (`csrrw sp, sscratch, sp`) and saving all user-mode general-purpose registers and relevant CSRs (`sstatus`, `sepc`, `scause`, `stval`) onto the kernel stack.
+
+```nasm
+// In entry.S
+.macro SAVE_CONTEXT
+  /* TODO: [p2-task3] save all general purpose registers here! */
+  /* HINT: Pay attention to the function of tp and sp, and save them carefully! */
+
+  # Resume kernel sp from sscratch
+  csrrw sp, sscratch, sp
+
+  # Decrease the stack pointer to allocate space for the context
+  addi sp, sp, -OFFSET_SIZE
+
+  # Store general-purpose registers
+  sd ra, OFFSET_REG_RA(sp)
+  // sd sp, OFFSET_REG_SP(sp) (Now we store sp last)
+  sd gp, OFFSET_REG_GP(sp)
+  // sd tp, OFFSET_REG_TP(sp)
+  sd t0, OFFSET_REG_T0(sp)
+  sd t1, OFFSET_REG_T1(sp)
+  sd t2, OFFSET_REG_T2(sp)
+  sd s0, OFFSET_REG_S0(sp)
+  sd s1, OFFSET_REG_S1(sp)
+  sd a0, OFFSET_REG_A0(sp)
+  sd a1, OFFSET_REG_A1(sp)
+  sd a2, OFFSET_REG_A2(sp)
+  sd a3, OFFSET_REG_A3(sp)
+  sd a4, OFFSET_REG_A4(sp)
+  sd a5, OFFSET_REG_A5(sp)
+  sd a6, OFFSET_REG_A6(sp)
+  sd a7, OFFSET_REG_A7(sp)
+  sd s2, OFFSET_REG_S2(sp)
+  sd s3, OFFSET_REG_S3(sp)
+  sd s4, OFFSET_REG_S4(sp)
+  sd s5, OFFSET_REG_S5(sp)
+  sd s6, OFFSET_REG_S6(sp)
+  sd s7, OFFSET_REG_S7(sp)
+  sd s8, OFFSET_REG_S8(sp)
+  sd s9, OFFSET_REG_S9(sp)
+  sd s10, OFFSET_REG_S10(sp)
+  sd s11, OFFSET_REG_S11(sp)
+  sd t3, OFFSET_REG_T3(sp)
+  sd t4, OFFSET_REG_T4(sp)
+  sd t5, OFFSET_REG_T5(sp)
+  sd t6, OFFSET_REG_T6(sp)
+
+  # Logic to store the ORIGINAL sp
+  csrr t0, sscratch
+  sd t0, OFFSET_REG_SP(sp)
+
+  /* TODO: [p2-task3] save sstatus, sepc, stval and scause on kernel stack */
+
+  # Store privileged registers (CSRs)
+  csrr t0, sstatus
+  sd t0, OFFSET_REG_SSTATUS(sp)
+  csrr t0, sepc
+  sd t0, OFFSET_REG_SEPC(sp)
+  csrr t0, stval
+  sd t0, OFFSET_REG_SBADADDR(sp)
+  csrr t0, scause
+  sd t0, OFFSET_REG_SCAUSE(sp)
+
+  /*
+   * Disable user-mode memory access as it should only be set in the
+   * actual user copy routines.
+   *
+   * Disable the FPU to detect illegal usage of floating point in kernel
+   * space.
+   */
+  li t0, SR_SUM | SR_FS
+
+
+.endm
+```
+
+*   **`exception_handler_entry`:** The assembly entry point for all exceptions. It orchestrates the `SAVE_CONTEXT`, sets up the return address (`ra`) to `ret_from_exception`, and calls the C-level `interrupt_helper` with the exception frame pointer, `stval`, and `scause`.
+
+```nasm
+ENTRY(exception_handler_entry)
+
+  /* TODO: [p2-task3] save context via the provided macro */
+  SAVE_CONTEXT
+
+  /* TODO: [p2-task3] load ret_from_exception into $ra so that we can return to
+   * ret_from_exception when interrupt_help complete.
+   */
+.data
+dbg_trap_msg:
+  .string "[DEBUG] Trap! scause: 0x%lx, sepc: 0x%lx, stval: 0x%lx\n"
+dbg_switch_msg:
+  .string "[DEBUG] Switch from pid %d to pid %d\n"
+
+.text
+  //  // -- DEBUG PRINT --
+  //  // Temporarily save a0-a3 to print debug info
+  //  addi sp, sp, -32
+  //  sd a0, 0(sp)
+  //  sd a1, 8(sp)
+  //  sd a2, 16(sp)
+  //  sd a3, 24(sp)
+  //
+  //  // Load arguments for printk
+  //  la a0, dbg_trap_msg
+  //  csrr a1, scause
+  //  csrr a2, sepc
+  //  csrr a3, stval
+  //  call printk
+  //
+  //  // Restore a0-a3
+  //  ld a0, 0(sp)
+  //  ld a1, 8(sp)
+  //  ld a2, 16(sp)
+  //  ld a3, 24(sp)
+  //  addi sp, sp, 32
+  //  // -- END DEBUG PRINT --
+
+  la ra, ret_from_exception
+
+
+  /* TODO: [p2-task3] call interrupt_helper
+   * NOTE: don't forget to pass parameters for it.
+   */
+  addi a0, sp, 0
+  csrr a1, stval
+  csrr a2, scause
+
+  la t0, interrupt_helper
+  jalr x0, t0, 0
+
+
+ENDPROC(exception_handler_entry)
+```
+
+#### Exception Return (`entry.S`):
+*   **`RESTORE_CONTEXT` Macro:** Implemented as the mirror image of `SAVE_CONTEXT`, restoring all saved registers and CSRs from the kernel stack. Crucially, it avoids restoring the `tp` register from the user context.
+
+```nasm
+// In entry.S
+.macro RESTORE_CONTEXT
+  /* TODO: Restore all general purpose registers and sepc, sstatus */
+  /* HINT: Pay attention to sp again! */
+
+  # Restore CSRs from the stack frame.
+  ld t0, OFFSET_REG_SSTATUS(sp)
+  csrw sstatus, t0
+  ld t0, OFFSET_REG_SEPC(sp)
+  csrw sepc, t0
+  ld t0, OFFSET_REG_SBADADDR(sp)
+  csrw stval, t0
+  ld t0, OFFSET_REG_SCAUSE(sp)
+  csrw scause, t0
+
+  # Prepare for the final atomic swap by loading the user's
+  # stack pointer into the sscratch register.
+  ld t0, OFFSET_REG_SP(sp)
+  csrw sscratch, t0
+
+  # Load all general-purpose registers from the stack frame.
+  # Note: sp (x2) is NOT restored here. It will be restored atomically later.
+  ld ra, OFFSET_REG_RA(sp)
+  ld gp, OFFSET_REG_GP(sp)
+  // ld tp, OFFSET_REG_TP(sp)
+  ld t0, OFFSET_REG_T0(sp)
+  ld t1, OFFSET_REG_T1(sp)
+  ld t2, OFFSET_REG_T2(sp)
+  ld s0, OFFSET_REG_S0(sp)
+  ld s1, OFFSET_REG_S1(sp)
+  ld a0, OFFSET_REG_A0(sp)
+  ld a1, OFFSET_REG_A1(sp)
+  ld a2, OFFSET_REG_A2(sp)
+  ld a3, OFFSET_REG_A3(sp)
+  ld a4, OFFSET_REG_A4(sp)
+  ld a5, OFFSET_REG_A5(sp)
+  ld a6, OFFSET_REG_A6(sp)
+  ld a7, OFFSET_REG_A7(sp)
+  ld s2, OFFSET_REG_S2(sp)
+  ld s3, OFFSET_REG_S3(sp)
+  ld s4, OFFSET_REG_S4(sp)
+  ld s5, OFFSET_REG_S5(sp)
+  ld s6, OFFSET_REG_S6(sp)
+  ld s7, OFFSET_REG_S7(sp)
+  ld s8, OFFSET_REG_S8(sp)
+  ld s9, OFFSET_REG_S9(sp)
+  ld s10, OFFSET_REG_S10(sp)
+  ld s11, OFFSET_REG_S11(sp)
+  ld t3, OFFSET_REG_T3(sp)
+  ld t4, OFFSET_REG_T4(sp)
+  ld t5, OFFSET_REG_T5(sp)
+  ld t6, OFFSET_REG_T6(sp)
+
+  # Deallocate the exception frame from the kernel stack.
+  addi sp, sp, OFFSET_SIZE
+
+.endm
+```
+
+*   **`ret_from_exception`:** Handles the final steps: calls `RESTORE_CONTEXT`, increments `sepc` by 4 (for ecalls to prevent re-execution), performs the final stack swap (`csrrw sp, sscratch, sp`), and executes `sret` to return to user mode.
+
+```nasm
+// In entry.S
+ENTRY(ret_from_exception)
+  /* TODO: [p2-task3] restore context via provided macro and return to sepc */
+  /* HINT: remember to check your sp, does it point to the right address? */
+  RESTORE_CONTEXT
+
+  # Increment sepc for syscalls, prevent re-executing the ecall.
+  # HANDLES THIS IN syscall.c
+  # csrr t0, sepc
+  # addi t0, t0, 4
+  # csrw sepc, t0
+
+  # Finally, atomically swap sp with sscratch to restore the user's sp
+  # and simultaneously save the kernel's sp in sscratch for the next trap.
+  csrrw sp, sscratch, sp
+
+  sret
+ENDPROC(ret_from_exception)
+```
+
+#### C-Level Exception Dispatch (`irq.c`):
+*   **`init_exception`:** Initialized `exc_table` to map exception codes to their respective C handlers (e.g., `EXCC_SYSCALL` to `handle_syscall`).
+
+```C
+// In irq.c
+void init_exception()
+{
+    /* TODO: [p2-task3] initialize exc_table */
+    /* NOTE: handle_syscall, handle_other, etc.*/
+    exc_table[EXCC_SYSCALL] = (handler_t)&handle_syscall;
+
+    /* TODO: [p2-task4] initialize irq_table */
+    /* NOTE: handle_int, handle_other, etc.*/
+
+    /* TODO: [p2-task3] set up the entrypoint of exceptions */
+    setup_exception();
+}
+```
+
+*   **`interrupt_helper`:** The main C dispatcher. It examines the `scause` register to determine if the trap is an interrupt or an exception, and then calls the appropriate handler from `irq_table` or `exc_table`.
+
+```C
+// In irq.c
+void interrupt_helper(regs_context_t *regs, uint64_t stval, uint64_t scause)
+{
+    // TODO: [p2-task3] & [p2-task4] interrupt handler.
+    // call corresponding handler by the value of `scause`
+    uint64_t exc_code = scause & (~SCAUSE_IRQ_FLAG);
+    if ((scause & SCAUSE_IRQ_FLAG) > 0) {
+        ((handler_t)irq_table[exc_code])(regs, stval, scause);
+    } else {
+        ((handler_t)exc_table[exc_code])(regs, stval, scause);
+    }
+}
+```
+
+#### System Call Handling (`syscall.c`):
+*   **`handle_syscall`:** The central system call handler. It extracts the syscall number (from `a7` in the saved context) and arguments (from `a0-a5`), looks up the corresponding kernel function in the `syscall` array, calls it, and places the return value back into `a0` of the saved context. It also increments `sepc` by 4.
+
+```C
+// In syscall.c
+void handle_syscall(regs_context_t *regs, uint64_t interrupt, uint64_t cause)
+{
+    dbprint("Syscall num: %d\n", regs->regs[17]);
+    /* TODO: [p2-task3] handle syscall exception */
+    /**
+     * HINT: call syscall function like syscall[fn](arg0, arg1, arg2),
+     * and pay attention to the return value and sepc
+     */
+
+    // riscv calling convention
+    // Syscall number: a7 (idx = x17)
+    // Syscall arg n : an (idx = 10 + n)
+    uint64_t arg0 = regs->regs[10];
+    uint64_t arg1 = regs->regs[11];
+    uint64_t arg2 = regs->regs[12];
+    uint64_t arg3 = regs->regs[13];
+    uint64_t arg4 = regs->regs[14];
+    uint64_t arg5 = regs->regs[15];
+    uint64_t ret_val = ((long (*)())syscall[regs->regs[17]])(arg0, arg1, arg2, arg3, arg4, arg5);
+
+    // Handling ret_val
+    regs->regs[10] = ret_val;
+
+    // Increasing `sepc` to prevent re-execution of the syscall
+    regs->sepc += 4;
+}
+```
+
+*   **`init_syscall` (in `main.c`):** Populated the `syscall` array with pointers to the actual kernel implementation functions (e.g., `do_scheduler`, `do_sleep`, `screen_write`, `do_mutex_lock_acquire`).
+
+```C
+// In main.c
+static void init_syscall(void)
+{
+    // TODO: [p2-task3] initialize system call table.
+    syscall[SYSCALL_SLEEP] = (long (*)())&do_sleep;
+    syscall[SYSCALL_YIELD] = (long (*)())&do_scheduler;
+    syscall[SYSCALL_WRITE] = (long (*)())&screen_write;
+    syscall[SYSCALL_CURSOR] = (long (*)())&screen_move_cursor;
+    syscall[SYSCALL_REFLUSH] = (long (*)())&screen_reflush;
+    syscall[SYSCALL_GET_TIMEBASE] = (long (*)())&get_time_base;
+    syscall[SYSCALL_GET_TICK] = (long (*)())&get_ticks;
+    syscall[SYSCALL_LOCK_INIT] = (long (*)())&do_mutex_lock_init;
+    syscall[SYSCALL_LOCK_ACQ] = (long (*)())&do_mutex_lock_acquire;
+    syscall[SYSCALL_LOCK_RELEASE] = (long (*)())&do_mutex_lock_release;
+}
+```
+
+#### User-Space System Call Interface (`tiny_libc/syscall.c`):
+*   **`invoke_syscall`:** A low-level function using inline assembly to set up registers (`a7` for syscall number, `a0-a5` for arguments) and execute the `ecall` instruction. It captures the return value from `a0`.
+
+```C
+// In syscall.c
+static long invoke_syscall(long sysno, long arg0, long arg1, long arg2,
+                           long arg3, long arg4)
+{
+    /* TODO: [p2-task3] implement invoke_syscall via inline assembly */
+
+    // Use GCC's register-specific variables to ensure values are in the correct registers.
+    // a7: syscall number
+    // a0-a5: syscall arguments
+    // a0: syscall return value
+    register long a7 asm("a7") = sysno;
+    register long a0 asm("a0") = arg0;
+    register long a1 asm("a1") = arg1;
+    register long a2 asm("a2") = arg2;
+    register long a3 asm("a3") = arg3;
+    register long a4 asm("a4") = arg4;
+    // The function signature only goes up to arg4, so we don't need to handle a5.
+
+    // Execute the 'ecall' instruction.
+    // The output is the return value, which will be in register a0.
+    // The inputs are the syscall number (a7) and arguments (a0-a4).
+    asm volatile(
+        "ecall"
+        : "+r"(a0) // Output: a0 is read/write. It's an input (arg0) and output (return value).
+        : "r"(a1), "r"(a2), "r"(a3), "r"(a4), "r"(a7) // Input registers.
+        : "memory"   // Clobber: Informs the compiler that this instruction may modify memory.
+    );
+
+    return a0;
+}
+```
+
+*   **`sys_*` wrappers:** All user-facing `sys_sleep`, `sys_yield`, `sys_mutex_acquire`, etc., were modified to call `invoke_syscall` instead of the old jump table.
+
+```C
+// In syscall.c
+void sys_yield(void)
+{
+    if (!SYSCALL_IMPLEMENTED) {
+        call_jmptab(YIELD, 0, 0, 0, 0, 0);
+    } else {
+        invoke_syscall(SYSCALL_YIELD, 0, 0, 0, 0, 0);
+    }
+}
+
+void sys_move_cursor(int x, int y)
+{
+    if (!SYSCALL_IMPLEMENTED) {
+        call_jmptab(MOVE_CURSOR, (long)x, (long)y, 0, 0, 0);
+    } else {
+        invoke_syscall(SYSCALL_CURSOR, (long)x, (long)y, 0, 0, 0);
+    }
+}
+
+void sys_write(char *buff)
+{
+    if (!SYSCALL_IMPLEMENTED) {
+        call_jmptab(PRINT, (long)buff, 0, 0, 0, 0);
+    } else {
+        invoke_syscall(SYSCALL_WRITE, (long)buff, 0, 0, 0, 0);
+    }
+}
+
+void sys_reflush(void)
+{
+    /* TODO: [p2-task1] call call_jmptab to implement sys_reflush */
+    if (!SYSCALL_IMPLEMENTED) {
+        call_jmptab(REFLUSH, 0, 0, 0, 0, 0);
+    } else {
+        /* TODO: [p2-task3] call invoke_syscall to implement sys_reflush */
+        invoke_syscall(SYSCALL_REFLUSH, 0, 0, 0, 0, 0);
+    }
+}
+
+int sys_mutex_init(int key)
+{
+    /* TODO: [p2-task2] call call_jmptab to implement sys_mutex_init */
+    if (!SYSCALL_IMPLEMENTED) {
+        return call_jmptab(MUTEX_INIT, (long)key, 0, 0, 0, 0);
+    } else {
+        /* TODO: [p2-task3] call invoke_syscall to implement sys_mutex_init */
+        return invoke_syscall(SYSCALL_LOCK_INIT, (long)key, 0, 0, 0, 0);
+    }
+}
+
+void sys_mutex_acquire(int mutex_idx)
+{
+    /* TODO: [p2-task2] call call_jmptab to implement sys_mutex_acquire */
+    if (!SYSCALL_IMPLEMENTED) {
+        call_jmptab(MUTEX_ACQ, mutex_idx, 0, 0, 0, 0);
+    } else {
+        /* TODO: [p2-task3] call invoke_syscall to implement sys_mutex_acquire */
+        invoke_syscall(SYSCALL_LOCK_ACQ, (long)mutex_idx, 0, 0, 0, 0);
+    }
+}
+
+void sys_mutex_release(int mutex_idx)
+{
+    /* TODO: [p2-task2] call call_jmptab to implement sys_mutex_release */
+    if (!SYSCALL_IMPLEMENTED) {
+        call_jmptab(MUTEX_RELEASE, mutex_idx, 0, 0, 0, 0);
+    } else {
+        /* TODO: [p2-task3] call invoke_syscall to implement sys_mutex_release */
+        invoke_syscall(SYSCALL_LOCK_RELEASE, (long)mutex_idx, 0, 0, 0, 0);
+    }
+}
+
+long sys_get_timebase(void)
+{
+    /* TODO: [p2-task3] call invoke_syscall to implement sys_get_timebase */
+    return invoke_syscall(SYSCALL_GET_TIMEBASE, 0, 0, 0, 0, 0);
+}
+
+long sys_get_tick(void)
+{
+    /* TODO: [p2-task3] call invoke_syscall to implement sys_get_tick */
+    return invoke_syscall(SYSCALL_GET_TICK, 0, 0, 0, 0, 0);
+}
+
+void sys_sleep(uint32_t time)
+{
+    /* TODO: [p2-task3] call invoke_syscall to implement sys_sleep */
+    invoke_syscall(SYSCALL_SLEEP, (long)time, 0, 0, 0, 0);
+}
+```
+
+#### Task Initialization (`sched.c`, `main.c`):
+*   **`init_pcb_stack`:** Modified to create a "fake" exception frame for new tasks, allowing them to start execution in User Mode via the `sret` path. This involved setting `sepc` to the task's entry point, `sstatus` for U-Mode return, and `sp` to the user stack.
+
+```C
+// In main.c
+void init_pcb_stack(
+    ptr_t kernel_stack, ptr_t user_stack, ptr_t entry_point,
+    pcb_t *pcb)
+{
+    /* TODO: [p2-task3] initialization of registers on kernel stack
+     * HINT: sp, ra, sepc, sstatus
+     * NOTE: To run the task in user mode, you should set corresponding bits
+     *     of sstatus(SPP, SPIE, etc.).
+     */
+
+    regs_context_t *pt_regs = (regs_context_t *)(kernel_stack - sizeof(regs_context_t));
+
+    // Initialize all registers to 0
+    for (int i = 0; i < 32; i++) {
+        pt_regs->regs[i] = 0;
+    }
+
+    // Initialize ra and sp
+    pt_regs->regs[1] = 0; // ra
+    pt_regs->regs[2] = user_stack; // sp
+
+    // Initialie `sstatus`, `SPP` field is now 0; `SPIE` field is now 1
+    pt_regs->sstatus = SR_SPIE;
+
+    // Initialize `sepc` to the entry point
+    pt_regs->sepc = entry_point;
+
+    /* TODO: [p2-task1] set sp to simulate just returning from switch_to
+     * NOTE: you should prepare a stack, and push some values to
+     * simulate a callee-saved context.
+     */
+    switchto_context_t *pt_switchto =
+        (switchto_context_t *)((ptr_t)pt_regs - sizeof(switchto_context_t));
+
+    // Set the `ra` (return address) register in our fake context to the task's entry point.
+    pt_switchto->regs[0] = (reg_t)&ret_from_exception; // ra
+
+    // Set the `sp` (stack pointer) for the new task.
+    // The stack pointer should point to the base of our fake context.
+    pt_switchto->regs[1] = (reg_t)pt_switchto; // sp
+
+    // Update the PCB's kernel_sp to point to this fake context.
+    pcb->kernel_sp = (reg_t)pt_switchto;
+    pcb->user_sp = user_stack;
+}
+```
+
+*   **`do_sleep` and `check_sleeping`:** Implemented the logic for tasks to voluntarily block themselves for a specified time and for the scheduler to wake them up when their time expires.
+
+```C
+// In sched.c
+void do_sleep(uint32_t sleep_time)
+{
+    // TODO: [p2-task3] sleep(seconds)
+    // NOTE: you can assume: 1 second = 1 `timebase` ticks
+
+    // 1. block the current_running
+    current_running->status = TASK_BLOCKED;
+    // 2. set the wake up time for the blocked task
+    current_running->wakeup_time = get_timer() + sleep_time;
+    // 3. reschedule because the current_running is blocked.
+    list_add_tail(&current_running->list, &sleep_queue);
+    do_scheduler();
+}
+```
+
+```C
+// In time.c
+void check_sleeping(void)
+{
+    // TODO: [p2-task3] Pick out tasks that should wake up from the sleep queue
+    list_node_t *node, *next_node;
+
+    for (node = sleep_queue.next, next_node = node->next;
+         node != &sleep_queue;
+         node = next_node, next_node = node->next)
+    {
+        pcb_t *task_to_wake = list_entry(node, pcb_t, list);
+
+        if (get_timer() >= task_to_wake->wakeup_time) {
+            do_unblock(node);
         }
     }
 }
 ```
 
-Then, we will implement each handler:
-
-> [!Note] The Implementation of Batch Processing
-> The implmentation of `write_batch` and `exec_batch` is as follows. Since once a task is finished, the kernel will restart, so I choose to write `IN_BATCH_MODE`, `BATCH_TASK_INDEX` (current task), `BATCH_TOTAL_TASKS` in fixed memory location. Therefore, the kernel will see it even after it restarts.
+*   **`cmd_wrq` (in `cmd.c`):** Modified to be the sole entry point for loading tasks, ensuring `process_id` is reset and tasks are loaded into the `pcb` array correctly.
 
 ```C
+// In cmd.c
 /**
- * Command handler for 'ls'.
- * List all tasks.
- */
-int cmd_ls(char *args) {
-    // The 'args' parameter is ignored for this command.
-    bios_putstr("Info: Listing tasks:\n\r");
-
-    for (int i = 0; i < tasknum; ++i) {
-        char index_str[5]; // Buffer to hold the string version of the index
-        bios_putstr("  [");
-        bios_putstr(itoa(i, index_str, 10));
-        bios_putstr("] ");
-        bios_putstr(tasks[i].name);
-        bios_putstr("\n\r");
-    }
-    return 0; // Indicate success
-}
-
-/**
- * Command handler for 'exec'.
- * Executes a task by its numerical ID or by its name.
- */
-int cmd_exec(char *args) {
-    if (args == NULL || *args == '\0') {
-        bios_putstr(ANSI_FMT("ERROR: Usage: exec <task_name_or_id>", ANSI_BG_RED));
-        bios_putstr(ANSI_FMT("\n\r", ANSI_NONE)); // Newline and reset color.
-        return 0;
-    }
-
-    int selected_task_idx = -1;
-
-    // First, try to parse the argument as a number (task ID).
-    int numeric_val = 0;
-    bool is_numeric = true;
-    char *p = args;
-    while (*p != '\0') {
-        if (*p < '0' || *p > '9') {
-            is_numeric = false;
-            break;
-        }
-        numeric_val = numeric_val * 10 + (*p - '0');
-        p++;
-    }
-
-    // If it was a valid number, check if it's a valid task index.
-    if (is_numeric) {
-        if (numeric_val >= 0 && numeric_val < tasknum) {
-            selected_task_idx = numeric_val;
-        }
-    }
-
-    // If it wasn't a valid number or a valid index, try to find it by name.
-    if (selected_task_idx == -1) {
-        selected_task_idx = search_task_name(tasknum, args);
-    }
-
-    // If a task was found (either by ID or name), execute it.
-    if (selected_task_idx != -1) {
-        char index_str[5];
-
-        bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE));
-        bios_putstr(ANSI_FMT("Now executing task ", ANSI_FG_GREEN));
-
-        bios_putstr(ANSI_FG_CYAN);
-        bios_putstr(itoa(selected_task_idx, index_str, 10));
-        bios_putstr(ANSI_NONE);
-        bios_putstr(ANSI_FMT(", ", ANSI_FG_GREEN));
-        bios_putstr(ANSI_FG_CYAN);
-        bios_putstr(tasks[selected_task_idx].name);
-        bios_putstr(ANSI_FMT("\n\r", ANSI_NONE)); // Newline and reset color.
-
-        bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE));
-        bios_putstr(ANSI_FMT("Windows is loading files...\n\r", ANSI_FG_GREEN));
-
-        uint64_t entry_point = load_task_img(tasks[selected_task_idx].name, tasknum);
-
-        bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE));
-        bios_putstr(ANSI_FMT("Starting task...\n\r", ANSI_FG_GREEN));
-
-        ((void (*)(void))entry_point)();
-
-        bios_putstr(ANSI_FMT("\nInfo: Task finished. Returning to shell.\n\r", ANSI_FG_GREEN));
-
-    } else {
-        bios_putstr(ANSI_FMT("ERROR: Invalid task index or name: ", ANSI_BG_RED));
-        bios_putstr(args); // Show the invalid input
-        bios_putstr(ANSI_FMT("\n\r", ANSI_NONE)); // Newline and reset color.
-    }
-
-    return 0; // Indicate success
-}
-
-/**
- * Command handler for 'help'.
- * Displays a list of supported commands and their descriptions.
- */
-int cmd_help(char *args) {
-    bios_putstr("Info: Supported commands:\n\r");
-    for (int i = 0; i < NR_CMD; ++i) {
-        bios_putstr("  ");
-        bios_putstr(cmd_table[i].name);
-        bios_putstr(": ");
-        bios_putstr(cmd_table[i].description);
-        bios_putstr("\n\r");
-    }
-    return 0; // Indicate success
-}
-
-/**
- * @brief Command handler to write a sequence of task names to a batch file on an SD card.
+ * @brief Command handler to write multiple programs into the ready queue.
  *
- * Parses task names from the `args` string, validates each one, and writes them
- * line-by-line into a buffer which is then written to the SD card.
+ * This command initializes PCBs for each specified task and adds them
+ * to the ready queue for scheduling.
  *
- * @param args A space-separated string of task names.
+ * @param args A space-separated string of task names to load into the ready queue.
  * @return Always returns 0.
  */
-int cmd_write_batch(char *args) {
-    // Check for empty arguments
-    if (args == NULL || *args == '\0') {
-        bios_putstr(ANSI_FMT("ERROR: Usage: write_batch <task_name1> <task_name2> ...", ANSI_BG_RED));
-        bios_putstr(ANSI_FMT("\n\r", ANSI_NONE)); // Newline and reset color.
-        return 0;
-    }
-
-    // --- Tokenize the input arguments into individual task names ---
+int cmd_wrq(char *args) {
     char parsed_names[MAX_BATCH_TASKS][MAX_NAME_LEN];
-    int num_parsed_tasks = tokenize_string(args, parsed_names, MAX_BATCH_TASKS);
+    int num_parsed_tasks;
 
-    // Handle errors from the tokenizer
-    if (num_parsed_tasks == -1) { // An error occurred, message already printed
-        return 0;
-    }
-    if (num_parsed_tasks == 0) {
-        bios_putstr(ANSI_FMT("ERROR: No tasks provided for batch.", ANSI_BG_RED));
-        bios_putstr(ANSI_FMT("\n\r", ANSI_NONE)); // Newline and reset color.
-        return 0;
-    }
-
-    // --- Validate tasks and format them into the batch buffer ---
-    int buffer_ptr = 0;
-    memset(batch_sequence_buffer, 0, sizeof(batch_sequence_buffer)); // Clear buffer before use
-
-    for (int i = 0; i < num_parsed_tasks; ++i) {
-        // Check if the task name is valid by searching a global list
-        if (search_task_name(tasknum, parsed_names[i]) == -1) {
-            bios_putstr(ANSI_FMT("ERROR: Invalid task name in batch: ", ANSI_BG_RED));
-            bios_putstr(parsed_names[i]);
-            bios_putstr(ANSI_FMT("\n\r", ANSI_NONE));
-            return 0; // Abort the entire operation if any task is invalid
+    // Check for wildcard '*', if so, load all tasks
+    if (args != NULL && strcmp(args, "*") == 0) {
+        num_parsed_tasks = 12;
+        char *all_tasks[] = {"fly", "fly1", "fly2", "fly3", "fly4", "fly5", "lock1", "lock2", "print1", "print2", "sleep", "timer"};
+        for (int i = 0; i < num_parsed_tasks; ++i) {
+            strncpy(parsed_names[i], all_tasks[i], MAX_NAME_LEN);
         }
-
-        // Append the valid task name and a newline to the buffer
-        int name_len = strlen(parsed_names[i]);
-        // Ensure there is enough space in the buffer for the name and newline
-        if (buffer_ptr + name_len + 1 >= BATCH_FILE_SIZE_SECTORS * SECTOR_SIZE) {
-            bios_putstr(ANSI_FMT("ERROR: Batch file buffer full.", ANSI_BG_RED));
-            bios_putstr(ANSI_FMT("\n\r", ANSI_NONE)); // Newline and reset color.
+    } else {
+        // Check for empty arguments
+        if (args == NULL || *args == '\0') {
+            bios_putstr(ANSI_FMT("ERROR: Usage: wrq <task_name1> <task_name2> ... or wrq *\n\r", ANSI_BG_RED));
             return 0;
         }
- 
-        memcpy((uint8_t *)batch_sequence_buffer + buffer_ptr, (uint8_t *)parsed_names[i], name_len);
-        buffer_ptr += name_len;
-        batch_sequence_buffer[buffer_ptr++] = '\n'; // Use newline as a separator
-    }
-    batch_sequence_buffer[buffer_ptr] = '\0'; // Null-terminate the entire buffer content
-
-    // --- Write the prepared buffer to the SD card ---
-    int write_ret = bios_sd_write((uintptr_t)batch_sequence_buffer, BATCH_FILE_SIZE_SECTORS, g_batch_file_start_sector);
-
-    if (write_ret == 0) { // Assuming 0 indicates success
-        bios_putstr(ANSI_FMT("Info: Batch sequence written to image successfully.\n\r", ANSI_FG_GREEN));
-    } else {
-        bios_putstr(ANSI_FMT("ERROR: Failed to write batch sequence to image (code: ", ANSI_BG_RED));
-        char ret_str[5];
-        bios_putstr(itoa(write_ret, ret_str, 10)); // Convert error code to string to print
-        bios_putstr(ANSI_FMT(").\n\r", ANSI_NONE));
+        // Tokenize the input arguments into individual task names
+        num_parsed_tasks = tokenize_string(args, parsed_names, MAX_BATCH_TASKS);
     }
 
-    return 0;
-}
-
-/**
- * @brief Command handler to execute a sequence of tasks from a batch file.
- *
- * Reads a predefined batch file from an SD card, parses the task names,
- * and launches the first task in the sequence. Subsequent tasks are
- * handled by a separate kernel-level batch handler.
- *
- * @param args Arguments passed to the command (which are ignored).
- * @return Always returns 0.
- */
-int cmd_exec_batch(char *args) {
-    // This command does not use arguments, so print a warning if any are provided
-    if (args != NULL && *args != '\0') {
-        bios_putstr(ANSI_FMT("WARNING: 'exec_batch' command does not take arguments. Ignoring.\n\r", ANSI_FG_YELLOW));
-    }
-
-    // --- 1. Read the batch file from the SD card into the global buffer ---
-    int read_ret = bios_sd_read((uintptr_t)batch_sequence_buffer, BATCH_FILE_SIZE_SECTORS, g_batch_file_start_sector);
-
-    if (read_ret != 0) { // Assuming 0 indicates success
-        bios_putstr(ANSI_FMT("ERROR: Failed to read batch file from image (code: ", ANSI_BG_RED));
-        char ret_str[5];
-        bios_putstr(itoa(read_ret, ret_str, 10)); // Convert error code to string
-        bios_putstr(ANSI_FMT(").\n\r", ANSI_NONE));
+    if (num_parsed_tasks <= 0) {
+        bios_putstr(ANSI_FMT("ERROR: No tasks provided for demo.", ANSI_BG_RED));
+        bios_putstr(ANSI_FMT("\n\r", ANSI_NONE));
         return 0;
     }
 
-    // --- 2. Parse the buffer content into a list of task names ---
-    batch_total_tasks = parse_batch_file(batch_sequence_buffer, batch_sequence, MAX_BATCH_TASKS);
-
-    // Check if parsing failed or if the file was empty
-    if (batch_total_tasks <= 0) {
-        bios_putstr(ANSI_FMT("ERROR: No valid tasks found in batch file.", ANSI_BG_RED));
-        bios_putstr(ANSI_FMT("\n\r", ANSI_NONE)); // Newline and reset color.
-        return 0;
-    }
-
-    // --- 3. Initialize the system's batch mode state ---
-    in_batch_mode = true;
-    batch_current_task_idx = 0;
-    *(bool *)(IN_BATCH_MODE_LOC) = true;
-    *(short *)(BATCH_TASK_INDEX_LOC) = 0;
-    *(short *)(BATCH_TOTAL_TASKS_LOC) = batch_total_tasks;
-
-    bios_putstr(ANSI_FMT("Info: Starting batch execution...\n\r", ANSI_FG_BLUE));
-
-    // --- 4. Launch the first task in the sequence ---
-    // The name is retrieved from the array we just populated
-    cmd_exec(batch_sequence[batch_current_task_idx]);
-
-    // After this function returns, the operating system's scheduler or main loop
-    // will see that `in_batch_mode` is true and will use a special handler
-    // to launch the next task (`batch_sequence[1]`) when the first one finishes.
- 
-    return 0;
-}
-
-```
-
->[!Note]
->The `cmd_exec_batch` function will return to kernel after it's execution. At this time, only one batch task has been processed. So, when the kernel `main` function starts, it should first check whether there's remaining batch tasks to be processed. If yes, it will call the `kernel_batch_handler` to handle the next batch task.
-
-The implementation of `kernel_batch_handler` is as follows:
-
-```C
-/**
- * @brief Handles the continuation of batch processing when the kernel restarts.
- *
- * This function is called early in the kernel's main loop. It checks if
- * 'in_batch_mode' is true. If so, it loads the next task from the batch
- * sequence and executes it. If the batch is finished, it resets the state.
- */
-void kernel_batch_handler(bool in_batch_mode, int batch_current_task_idx, int batch_total_tasks, int batch_io_buffer_val) {
-    if (in_batch_mode) {
-        bios_putstr(ANSI_FMT("Info: Continuing batch processing...", ANSI_BG_BLUE));
-        bios_putstr(ANSI_FMT("\n\r", ANSI_NONE)); // Newline and reset color.
-
-        // --- 1. Read and parse the batch file to repopulate the task list ---
-        int read_ret = bios_sd_read((uintptr_t)batch_sequence_buffer,
-                                    BATCH_FILE_SIZE_SECTORS, g_batch_file_start_sector);
-        if (read_ret != 0) {
-            bios_putstr(ANSI_FMT("ERROR: Failed to read batch file for continuation.", ANSI_BG_RED));
-            bios_putstr(ANSI_FMT("\n\r", ANSI_NONE)); // Newline and reset color.
-            // Critical error, reset batch mode and fall through to shell
-            in_batch_mode = false;
-            *(bool *)(IN_BATCH_MODE_LOC) = false; // Persist state change
-            goto end_batch_mode_check;
-        }
-
-        int parsed_count = parse_batch_file(batch_sequence_buffer,
-                                            batch_sequence, MAX_BATCH_TASKS);
-        if (parsed_count <= 0) {
-            bios_putstr(ANSI_FMT("ERROR: Invalid batch file content for continuation.", ANSI_BG_RED));
-            bios_putstr(ANSI_FMT("\n\r", ANSI_NONE)); // Newline and reset color.
-            // File is corrupt/empty, reset batch mode
-            in_batch_mode = false;
-            *(bool *)(IN_BATCH_MODE_LOC) = false; // Persist state change
-            goto end_batch_mode_check;
-        }
-
-        // --- 2. Determine the next task to run ---
-        batch_current_task_idx++; // Increment to the next task index
-
-        if (batch_current_task_idx < batch_total_tasks) {
-            // --- 3a. More tasks remain: Launch the next one ---
-            bios_putstr(ANSI_FMT("Info: Launching next task in batch: ", ANSI_FG_GREEN));
-            bios_putstr(batch_sequence[batch_current_task_idx]);
+    // --- Initialize PCBs and add them to the ready_queue ---
+    list_init(&ready_queue); // the list initialized in main.c shall be invalidated
+    ptr_t next_task_addr = TASK_MEM_BASE;
+    for (int i = 0; i < num_parsed_tasks; ++i) {
+        int task_idx = search_task_name(tasknum, parsed_names[i]);
+        if (task_idx == -1) {
+            bios_putstr(ANSI_FMT("ERROR: Invalid task name in arguments: ", ANSI_BG_RED));
+            bios_putstr(parsed_names[i]);
             bios_putstr(ANSI_FMT("\n\r", ANSI_NONE));
+            return 0; // Abort
+        }
 
-            // Update the persistent batch state in the memory-mapped region
-            *(short *)(BATCH_TASK_INDEX_LOC) = batch_current_task_idx;
+        // Get a free PCB
+        pcb_t *new_pcb = &pcb[process_id];
 
-            // Use inline assembly to set the a0 register. In RISC-V, a0 is used
-            // for the first argument to a function and for its return value.
-            // This effectively passes the previous task's output as input to the next.
-            asm volatile ("mv a0, %0" : : "r" (batch_io_buffer_val));
+        // Load the task into memory
+        ptr_t entry_point = load_task_img(tasks[task_idx].name, tasknum, next_task_addr);
 
-            // Print the return value out
-            char temp_buf[] = "_____";
-            char *retval_buf = itoa(batch_io_buffer_val, temp_buf, 10);
-            bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE) ANSI_FMT("Got return value ", ANSI_FG_GREEN));
-            bios_putstr(ANSI_FG_CYAN);
-            bios_putstr(retval_buf);
-            bios_putstr(ANSI_NONE);
-            bios_putstr(ANSI_FMT(", passing it to 'a0'.\n", ANSI_FG_GREEN));
+        // Initialize the PCB
+        new_pcb->kernel_sp = allocKernelPage(KERNEL_STACK_PAGES) + KERNEL_STACK_PAGES * PAGE_SIZE;
+        new_pcb->user_sp = allocUserPage(USER_STACK_PAGES) + USER_STACK_PAGES * PAGE_SIZE;
+        new_pcb->pid = process_id++;
+        new_pcb->status = TASK_READY;
+        new_pcb->cursor_x = 0;
+        new_pcb->cursor_y = i; // Give each task its own line
 
-            // This call will not return in the traditional sense. It will jump
-            // to the new task's entry point, and the kernel will be restarted
-            // by the task's exit handler (crt0.S).
-            cmd_exec(batch_sequence[batch_current_task_idx]);
+        // Initialize the fake context on the stack
+        init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, new_pcb);
 
-        } else {
-            // --- 3b. No more tasks: The batch has finished ---
-            bios_putstr(ANSI_FMT("Info: Batch processing finished.\n\r", ANSI_FG_GREEN));
-            in_batch_mode = false;
+        // Add the initialized PCB to the ready queue
+        list_add_tail(&new_pcb->list, &ready_queue);
 
-            // Reset all persistent batch state variables in the memory-mapped region
-            *(bool *)(IN_BATCH_MODE_LOC) = false;
-            *(short *)(BATCH_TASK_INDEX_LOC) = 0;
-            *(short *)(BATCH_TOTAL_TASKS_LOC) = 0;
+        // Update the next available task address, page-aligned
+        next_task_addr += tasks[task_idx].byte_size;
+        next_task_addr = (next_task_addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    }
+    
+    bios_putstr(ANSI_FMT("Info: Starting scheduler...\n\r", ANSI_FG_GREEN));
 
-            // Print the return value out
-            char temp_buf[] = "_____";
-            char *retval_buf = itoa(batch_io_buffer_val, temp_buf, 10);
-            bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE) ANSI_FMT("Final return value: ", ANSI_FG_GREEN));
-            bios_putstr(ANSI_FG_CYAN);
-            bios_putstr(retval_buf);
-            bios_putstr(ANSI_NONE);
-            bios_putstr(ANSI_FMT(".\n", ANSI_FG_GREEN));
+    // Enough newlines to clear the screen
+    // (don't know how to utilize screen_clear and screen_reflush API)
+    bios_putstr("\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r");
+    bios_putstr("\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r");
+    bios_putstr("\n\r\n\r\n\r");
+    screen_clear();
+    screen_reflush();
+
+    // --- do_scheduler takes over control ---
+    while (1) {
+        do_scheduler();
+    }
+
+    return 0;
+}
+```
+
+### Key Debugging Challenges & Learnings:
+
+*   **`tp` Register Management:** Understanding that `tp` (thread pointer) is special. It must be correctly set to `current_running` upon entering the kernel from a trap, and maintained across context switches (`switch_to`), but not saved/restored as part of the user's general-purpose registers in the exception frame.
+
+```nasm
+// In entry.S
+.macro SAVE_CONTEXT
+  /* TODO: [p2-task3] save all general purpose registers here! */
+  /* HINT: Pay attention to the function of tp and sp, and save them carefully! */
+
+  # Resume kernel sp from sscratch
+  csrrw sp, sscratch, sp
+
+  # Decrease the stack pointer to allocate space for the context
+  addi sp, sp, -OFFSET_SIZE
+
+  # Store general-purpose registers
+  sd ra, OFFSET_REG_RA(sp)
+  // sd sp, OFFSET_REG_SP(sp) (Now we store sp last)
+  sd gp, OFFSET_REG_GP(sp)
+  // sd tp, OFFSET_REG_TP(sp) <-- SHOULD NOT STORE THIS
+  ......
+  
+// In RESTORE_CONTEXT
+.macro RESTORE_CONTEXT
+  /* TODO: Restore all general purpose registers and sepc, sstatus */
+  /* HINT: Pay attention to sp again! */
+
+  # Restore CSRs from the stack frame.
+  ld t0, OFFSET_REG_SSTATUS(sp)
+  csrw sstatus, t0
+  ld t0, OFFSET_REG_SEPC(sp)
+  csrw sepc, t0
+  ld t0, OFFSET_REG_SBADADDR(sp)
+  csrw stval, t0
+  ld t0, OFFSET_REG_SCAUSE(sp)
+  csrw scause, t0
+
+  # Prepare for the final atomic swap by loading the user's
+  # stack pointer into the sscratch register.
+  ld t0, OFFSET_REG_SP(sp)
+  csrw sscratch, t0
+
+  # Load all general-purpose registers from the stack frame.
+  # Note: sp (x2) is NOT restored here. It will be restored atomically later.
+  ld ra, OFFSET_REG_RA(sp)
+  ld gp, OFFSET_REG_GP(sp)
+  // ld tp, OFFSET_REG_TP(sp) <-- SHOULD NOT RESUME THIS ONE
+```
+
+*   **PCB Array Overflow (10+ hours debugging this one):** called `pcb_init()` in both `main.c` and `cmd.c`, caused the PCB to overflow, resulting in the following error message:
+
+```
+exception code: 2 , Illegal instruction , epc 50544e74 , ra 50203508
+  ### ERROR ### Please RESET the board ###
+```
+
+Modified `init_pcb()` function:
+
+```C
+// leave the init work to cmd_wrq
+static void init_pcb(void)
+{
+    // /* TODO: [p2-task1] load needed tasks and init their corresponding PCB */
+    // ptr_t next_task_addr = TASK_MEM_BASE;
+    // tasknum = *(short *)TASK_NUM_LOC; // Ensure tasknum is loaded
+
+    // for (int i = 0; i < tasknum; i++) {
+    //     // Load the task into memory at the next available address
+    //     ptr_t entry_point = load_task_img(tasks[i].name, tasknum, next_task_addr);
+        
+    //     // Get a free PCB
+    //     pcb_t *new_pcb = &pcb[process_id];
+
+    //     // Initialize the PCB
+    //     new_pcb->kernel_sp = allocKernelPage(KERNEL_STACK_PAGES) + KERNEL_STACK_PAGES * PAGE_SIZE;
+    //     new_pcb->user_sp = allocUserPage(USER_STACK_PAGES) + USER_STACK_PAGES * PAGE_SIZE;
+    //     new_pcb->pid = process_id++;
+    //     new_pcb->status = TASK_READY;
+    //     new_pcb->cursor_x = 0;
+    //     new_pcb->cursor_y = i; // Give each task its own line to start
+
+    //     // Initialize the stack for the first run
+    //     init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, new_pcb);
+
+    //     // Add the PCB to the ready queue
+    //     list_add_tail(&new_pcb->list, &ready_queue);
+
+    //     // Update the next available task address, page-aligned
+    //     next_task_addr += tasks[i].byte_size;
+    //     next_task_addr = (next_task_addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    // }
+
+    /* TODO: [p2-task1] remember to initialize 'current_running' */
+    current_running = &pid0_pcb;
+}
+```
+
+*   **Linked List Corruption:** Identifying a "double-delete" bug in `check_sleeping` (calling `list_del` twice on the same node) that led to Store/AMO access fault due to corrupted list pointers.
+
+```C
+// In sched.c
+void check_sleeping(void)
+{
+    // TODO: [p2-task3] Pick out tasks that should wake up from the sleep queue
+    list_node_t *node, *next_node;
+
+    for (node = sleep_queue.next, next_node = node->next;
+         node != &sleep_queue;
+         node = next_node, next_node = node->next)
+    {
+        pcb_t *task_to_wake = list_entry(node, pcb_t, list);
+
+        if (get_timer() >= task_to_wake->wakeup_time) {
+	        // list_del(node); <--- DOUBLE FREED `node`
+            do_unblock(node);  <--- DOUBLE FREED `node`
         }
     }
-
-end_batch_mode_check:
-    // This label is a jump target to allow the function to gracefully exit
-    // batch mode on error and continue to the regular shell prompt.
-    return;
 }
 
 ```
 
-The checking logic in early stage of `main` function is as follows:
+*   **Debugging Tools:** Extensive use of GDB (breakpoints, `n`, `si`, `p`, `x`, `watch`) and custom `dbprint` macros to trace execution flow, inspect registers, and pinpoint memory corruption.
 
 ```C
-    // Batch mode check and handler
-    bool in_batch_mode = *(bool *)(IN_BATCH_MODE_LOC);
-    int batch_task_index = *(short *)(BATCH_TASK_INDEX_LOC);
-    int batch_total_tasks = *(short *)(BATCH_TOTAL_TASKS_LOC);
-    batch_io_buffer_val = *(uint32_t *)(BATCH_IO_BUFFER_LOC);
-    kernel_batch_handler(in_batch_mode, batch_task_index, batch_total_tasks, batch_io_buffer_val);
+// In newly created include/os/dbprint.h
+#ifndef __DB_PRINT_H__
+#define __DB_PRINT_H__
+
+#include <printk.h>
+#include <os/string.h>
+
+// Master switch for debug prints
+#define DEBUG_EN 0
+
+// ANSI color codes
+#define ANSI_COLOR_MAGENTA ""
+#define ANSI_COLOR_RESET   ""
+
+// The debug print macro
+#if DEBUG_EN
+    #define dbprint(fmt, ...) \
+        do { \
+            printk("[DEBUG] ", ##__VA_ARGS__); \
+        } while (0)
+#else
+    #define dbprint(fmt, ...) 
+#endif
+
+#endif // __DB_PRINT_H__
 ```
 
-### Error: `Instruction access fault , epc 0`
-
-After implemented `cmd_batch_write`, I encountered the following error:
-
-```
-(cmd) write_batch 2048
-exception code: 1 , Instruction access fault , epc 0 , ra 50201bfc
-### ERROR ### Please RESET the board ###
-```
-
-I carefully reviewed the gdb output:
-
-```
-0x0000000000001000 in ?? ()
-(gdb) display/5i $pc
-1: x/5i $pc
-=> 0x1000:      auipc   t0,0x0
-   0x1004:      addi    a2,t0,40
-   0x1008:      csrr    a0,mhartid
-   0x100c:      ld      a1,32(t0)
-   0x1010:      ld      t0,24(t0)
-(gdb) b bios_sd_write
-Breakpoint 1 at 0x50201be0: file include/os/kernel.h, line 23.
-(gdb) c
-Continuing.
-
-Breakpoint 1, bios_sd_write (mem_address=1344289624, num_of_blocks=2, block_id=<optimized out>) at include/os/kernel.h:51
-51          return call_jmptab(SD_WRITE, (long)mem_address, (long)num_of_blocks, \
-1: x/5i $pc
-=> 0x50201be0 <cmd_write_batch+266>:    addi    a5,a5,-224
-   0x50201be4 <cmd_write_batch+270>:    ld      a5,0(a5)
-   0x50201be6 <cmd_write_batch+272>:    auipc   a2,0x2
-   0x50201bea <cmd_write_batch+276>:    lwu     a2,-150(a2)
-   0x50201bee <cmd_write_batch+280>:    slli    a0,s3,0x20
-(gdb) x/5i $pc
-=> 0x50201be0 <cmd_write_batch+266>:    addi    a5,a5,-224
-   0x50201be4 <cmd_write_batch+270>:    ld      a5,0(a5)
-   0x50201be6 <cmd_write_batch+272>:    auipc   a2,0x2
-   0x50201bea <cmd_write_batch+276>:    lwu     a2,-150(a2)
-   0x50201bee <cmd_write_batch+280>:    slli    a0,s3,0x20
-(gdb) p $a5
-$1 = 1375731712
-(gdb) p/x $a5
-$2 = 0x52000000
-(gdb) si
-0x0000000050201be4 in call_jmptab (which=4, arg0=1344289624, arg1=2, arg2=<optimized out>, arg3=0, arg4=0) at include/os/kernel.h:23
-23          return func(arg0, arg1, arg2, arg3, arg4);
-1: x/5i $pc
-=> 0x50201be4 <cmd_write_batch+270>:    ld      a5,0(a5)
-   0x50201be6 <cmd_write_batch+272>:    auipc   a2,0x2
-   0x50201bea <cmd_write_batch+276>:    lwu     a2,-150(a2)
-   0x50201bee <cmd_write_batch+280>:    slli    a0,s3,0x20
-   0x50201bf2 <cmd_write_batch+284>:    li      a4,0
-(gdb) p/x $a5
-$3 = 0x51ffff20
-```
-
-Since `0x51ffff20` is really close to the `jmptab` base address, I decided that the problem must locate in `jmptab`: the program doesn't know where it should jump, so it jump to `0`.
-
-The code confirms my guess -- The original code did not add `bios_sd_write` to `jmptab`.
-
-```C
-static void init_jmptab(void)
-{
-    volatile long (*(*jmptab))() = (volatile long (*(*))())KERNEL_JMPTAB_BASE;
-
-    jmptab[CONSOLE_PUTSTR]  = (long (*)())port_write;
-    jmptab[CONSOLE_PUTCHAR] = (long (*)())port_write_ch;
-    jmptab[CONSOLE_GETCHAR] = (long (*)())port_read_ch;
-    jmptab[SD_READ]         = (long (*)())sd_read;
-    jmptab[SD_WRITE]         = (long (*)())sd_write; <- should add this line
-}
-```
-
-### Implementation User functions
-
-We implement four new user functions as follows:
-
-```C
-#include <kernel.h>
-
-int main() {
-    int num = 5;
-    return num;
-}
-```
-
-```C
-#include <kernel.h>
-#define BOOT_LOADER_SIG_OFFSET (0x1fe + 0x50200000)
-#define BATCH_IO_BUFFER_LOC (BOOT_LOADER_SIG_OFFSET - 8)
-
-int main(void) {
-    int input_val = *(short *)(BATCH_IO_BUFFER_LOC);
-    return input_val + 10;
-}
-```
-
-```C
-#include <kernel.h>
-#define BOOT_LOADER_SIG_OFFSET (0x1fe + 0x50200000)
-#define BATCH_IO_BUFFER_LOC (BOOT_LOADER_SIG_OFFSET - 8)
-
-int main(void) {
-    int input_val = *(short *)(BATCH_IO_BUFFER_LOC);
-    return input_val * 3;
-}
-```
-
-```C
-#include <kernel.h>
-#define BOOT_LOADER_SIG_OFFSET (0x1fe + 0x50200000)
-#define BATCH_IO_BUFFER_LOC (BOOT_LOADER_SIG_OFFSET - 8)
-
-int main(void) {
-    int input_val = *(short *)(BATCH_IO_BUFFER_LOC);
-    return input_val * input_val;
-}
-```
-
-> [!Warning] Return Value Passing
-> Initially, I planned to pass the returned value to `a0`, however, user `main` function could not take `a0` as it's input. As a result, I choose to directly obtain the value from memory.
-
-### Enhancing UI Appearance
-
-Let us be retro. The first batch processing system is IBM GM-NAA I/O Batch Processing System. It is definitely exciting to print an IBM logo when the OS starts up. This is the printing function:
-
-Source: [AbhishekGhosh/IBM-ASCII-Logo-For-SSH: IBM ASCII Logo For SSH ASCII Logo for SSH Pre-Login](https://github.com/AbhishekGhosh/IBM-ASCII-Logo-For-SSH)
-
-```C
-/**
- * @brief Print the batch processing system logo when OS starts.
- */
-void print_logo(void) {
-    bios_putstr("=====================================================\n\r");
-    bios_putstr("        GM-NAA I/O BATCH PROCESSING MONITOR\n\r");
-    bios_putstr("=====================================================\n\r");
-    bios_putstr("\n\r");
-    bios_putstr("*****************************************************\n\r");
-    bios_putstr("*****************************************************\n\r");
-    bios_putstr("*****************************************************\n\r");
-    bios_putstr("███████████  ████████████      ████████      ████████\n\r");
-    bios_putstr("███████████  ███████████████   █████████    █████████\n\r");
-    bios_putstr("   █████        ████   █████     ████████  ████████\n\r");
-    bios_putstr("   █████        ███████████      ████  ███ ███ ████\n\r");
-    bios_putstr("   █████        ███████████      ████  ███████ ████\n\r");
-    bios_putstr("   █████        ████   █████     ████   █████  ████\n\r");
-    bios_putstr("███████████  ███████████████   ██████    ███   ██████\n\r");
-    bios_putstr("███████████  ████████████      ██████     █    ██████\n\r");
-    bios_putstr("*****************************************************\n\r");
-    bios_putstr("*  This system is for the use of authorized users   *\n\r");
-    bios_putstr("*  only. Usage of  this system may be monitored     *\n\r");
-    bios_putstr("*  and recorded                                     *\n\r");
-    bios_putstr("*****************************************************\n\r");
-    bios_putstr("\n\r"); // Add an extra newline for spacing
-}
-```
-
-To ensure the logo is only printed once, we can add a flag in a specific mem address, and in kernel `main` function, we can use this logic to check for it's status:
-
-```C
-    // Print logo on startup
-    if (*(short *)(LOGO_HAS_PRINTED) == 0) {
-        print_logo();
-        *(short *)(LOGO_HAS_PRINTED) = 1;
-    }
-```
-
-### Testing the Batch Processing System
-
-This is a full process of how this batch processing system would work:
-
-```
-=> loadboot
-It's Chuxiao Han's bootloader...
-DEBUG: task detected, '2048'
-DEBUG: task detected, 'app_num1'
-DEBUG: task detected, 'app_num2'
-DEBUG: task detected, 'app_num3'
-DEBUG: task detected, 'app_num4'
-DEBUG: task detected, 'auipc'
-DEBUG: task detected, 'bss'
-DEBUG: task detected, 'data'
-Info: Hello OS!
-Info: bss check: t version: 2
-Info: Loaded 8 tasks.
-=====================================================
-        GM-NAA I/O BATCH PROCESSING MONITOR
-=====================================================
-
-*****************************************************
-*****************************************************
-*****************************************************
-███████████  ████████████      ████████      ████████
-███████████  ███████████████   █████████    █████████
-   █████        ████   █████     ████████  ████████
-   █████        ███████████      ████  ███ ███ ████
-   █████        ███████████      ████  ███████ ████
-   █████        ████   █████     ████   █████  ████
-███████████  ███████████████   ██████    ███   ██████
-███████████  ████████████      ██████     █    ██████
-*****************************************************
-*  This system is for the use of authorized users   *
-*  only. Usage of  this system may be monitored     *
-*  and recorded                                     *
-*****************************************************
-
-(cmd) write_batch app_num1 app_num2 app_num3 app_num4
-Info: Batch sequence written to image successfully.
-(cmd) exec_batch
-Info: Starting batch execution...
-Info: Now executing task 1, app_num1
-Info: Windows is loading files...
-DEBUG: Loaded 'app_num1'. First bytes in memory:
-  17 05 00 00 13 05 85 08 97 05 00 00 93 85 05 08
-  Last bytes in memory:
-  18 00 00 00 c6 ff ff ff 04 00 00 00 00 00 00 00
-Info: Starting task...
-DEBUG: task detected, '2048'
-DEBUG: task detected, 'app_num1'
-DEBUG: task detected, 'app_num2'
-DEBUG: task detected, 'app_num3'
-DEBUG: task detected, 'app_num4'
-DEBUG: task detected, 'auipc'
-DEBUG: task detected, 'bss'
-DEBUG: task detected, 'data'
-Info: Hello OS!
-Info: bss check: t version: 2
-Info: Continuing batch processing...
-Info: Launching next task in batch: app_num2
-Info: Got return value 5, passing it to 'a0'.
-Info: Now executing task 2, app_num2
-Info: Windows is loading files...
-DEBUG: Loaded 'app_num2'. First bytes in memory:
-  17 05 00 00 13 05 05 09 97 05 00 00 93 85 85 08
-  Last bytes in memory:
-  18 00 00 00 be ff ff ff 0c 00 00 00 00 00 00 00
-Info: Starting task...
-DEBUG: task detected, '2048'
-DEBUG: task detected, 'app_num1'
-DEBUG: task detected, 'app_num2'
-DEBUG: task detected, 'app_num3'
-DEBUG: task detected, 'app_num4'
-DEBUG: task detected, 'auipc'
-DEBUG: task detected, 'bss'
-DEBUG: task detected, 'data'
-Info: Hello OS!
-Info: bss check: t version: 2
-Info: Continuing batch processing...
-Info: Launching next task in batch: app_num3
-Info: Got return value 15, passing it to 'a0'.
-Info: Now executing task 3, app_num3
-Info: Windows is loading files...
-DEBUG: Loaded 'app_num3'. First bytes in memory:
-  17 05 00 00 13 05 85 09 97 05 00 00 93 85 05 09
-  Last bytes in memory:
-  18 00 00 00 b6 ff ff ff 14 00 00 00 00 00 00 00
-Info: Starting task...
-DEBUG: task detected, '2048'
-DEBUG: task detected, 'app_num1'
-DEBUG: task detected, 'app_num2'
-DEBUG: task detected, 'app_num3'
-DEBUG: task detected, 'app_num4'
-DEBUG: task detected, 'auipc'
-DEBUG: task detected, 'bss'
-DEBUG: task detected, 'data'
-Info: Hello OS!
-Info: bss check: t version: 2
-Info: Continuing batch processing...
-Info: Launching next task in batch: app_num4
-Info: Got return value 45, passing it to 'a0'.
-Info: Now executing task 4, app_num4
-Info: Windows is loading files...
-DEBUG: Loaded 'app_num4'. First bytes in memory:
-  17 05 00 00 13 05 05 09 97 05 00 00 93 85 85 08
-  Last bytes in memory:
-  18 00 00 00 be ff ff ff 0e 00 00 00 00 00 00 00
-Info: Starting task...
-DEBUG: task detected, '2048'
-DEBUG: task detected, 'app_num1'
-DEBUG: task detected, 'app_num2'
-DEBUG: task detected, 'app_num3'
-DEBUG: task detected, 'app_num4'
-DEBUG: task detected, 'auipc'
-DEBUG: task detected, 'bss'
-DEBUG: task detected, 'data'
-Info: Hello OS!
-Info: bss check: t version: 2
-Info: Continuing batch processing...
-Info: Batch processing finished.
-Info: Final return value: 2025.
-Info: Loaded 8 tasks.
-(cmd) ls
-Info: Listing tasks:
-  [0] 2048
-  [1] app_num1
-  [2] app_num2
-  [3] app_num3
-  [4] app_num4
-  [5] auipc
-  [6] bss
-  [7] data
-```
