@@ -1,5 +1,7 @@
+#include "os/irq.h"
 #include "os/list.h"
 #include "os/sched.h"
+#include "os/time.h"
 #include "screen.h"
 #include <os/mm.h>
 #include <common.h>
@@ -31,7 +33,8 @@ command_t cmd_table[] = {
     {"exec", "Execute a task by name or ID", cmd_exec},
     {"write_batch", "Write a batch processing sequence to image", cmd_write_batch},
     {"exec_batch", "Execute the stored batch processing sequence", cmd_exec_batch},
-    {"wrq", "(W)rite programs into (r)eady (q)ueue.", cmd_wrq}
+    {"wrq", "(W)rite programs into (r)eady (q)ueue.", cmd_wrq},
+    {"twrq", "The timer interrupt version of `wrq`", cmd_twrq}
 };
 
 /**
@@ -746,3 +749,102 @@ int cmd_wrq(char *args) {
 
     return 0;
 }
+
+/**
+ * @brief Command handler to write multiple programs into the ready queue and enabling timer interrupt.
+ *
+ * This command initializes PCBs for each specified task and adds them
+ * to the ready queue for scheduling.
+ *
+ * @param args A space-separated string of task names to load into the ready queue.
+ * @return Always returns 0.
+ */
+int cmd_twrq(char *args) {
+    char parsed_names[MAX_BATCH_TASKS][MAX_NAME_LEN];
+    int num_parsed_tasks;
+
+    // Check for wildcard '*', if so, load all tasks
+    if (args != NULL && strcmp(args, "*") == 0) {
+        num_parsed_tasks = 12;
+        char *all_tasks[] = {"fly", "fly1", "fly2", "fly3", "fly4", "fly5", "lock1", "lock2", "print1", "print2", "sleep", "timer"};
+        for (int i = 0; i < num_parsed_tasks; ++i) {
+            strncpy(parsed_names[i], all_tasks[i], MAX_NAME_LEN);
+        }
+    } else {
+        // Check for empty arguments
+        if (args == NULL || *args == '\0') {
+            bios_putstr(ANSI_FMT("ERROR: Usage: twrq <task_name1> <task_name2> ... or twrq *\n\r", ANSI_BG_RED));
+            return 0;
+        }
+        // Tokenize the input arguments into individual task names
+        num_parsed_tasks = tokenize_string(args, parsed_names, MAX_BATCH_TASKS);
+    }
+
+    if (num_parsed_tasks <= 0) {
+        bios_putstr(ANSI_FMT("ERROR: No tasks provided for demo.", ANSI_BG_RED));
+        bios_putstr(ANSI_FMT("\n\r", ANSI_NONE));
+        return 0;
+    }
+
+    // --- Initialize PCBs and add them to the ready_queue ---
+    list_init(&ready_queue); // the list initialized in main.c shall be invalidated
+    ptr_t next_task_addr = TASK_MEM_BASE;
+    for (int i = 0; i < num_parsed_tasks; ++i) {
+        int task_idx = search_task_name(tasknum, parsed_names[i]);
+        if (task_idx == -1) {
+            bios_putstr(ANSI_FMT("ERROR: Invalid task name in arguments: ", ANSI_BG_RED));
+            bios_putstr(parsed_names[i]);
+            bios_putstr(ANSI_FMT("\n\r", ANSI_NONE));
+            return 0; // Abort
+        }
+
+        // Get a free PCB
+        pcb_t *new_pcb = &pcb[process_id];
+
+        // Load the task into memory
+        ptr_t entry_point = load_task_img(tasks[task_idx].name, tasknum, next_task_addr);
+
+        // Initialize the PCB
+        new_pcb->kernel_sp = allocKernelPage(KERNEL_STACK_PAGES) + KERNEL_STACK_PAGES * PAGE_SIZE;
+        new_pcb->user_sp = allocUserPage(USER_STACK_PAGES) + USER_STACK_PAGES * PAGE_SIZE;
+        new_pcb->pid = process_id++;
+        new_pcb->status = TASK_READY;
+        new_pcb->cursor_x = 0;
+        new_pcb->cursor_y = i; // Give each task its own line
+
+        // Initialize the fake context on the stack
+        init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, new_pcb);
+
+        // Add the initialized PCB to the ready queue
+        list_add_tail(&new_pcb->list, &ready_queue);
+
+        // Update the next available task address, page-aligned
+        next_task_addr += tasks[task_idx].byte_size;
+        next_task_addr = (next_task_addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    }
+
+    bios_putstr(ANSI_FMT("Info: Starting scheduler...\n\r", ANSI_FG_GREEN));
+
+    // Enough newlines to clear the screen
+    // (don't know how to utilize screen_clear and screen_reflush API)
+    bios_putstr("\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r");
+    bios_putstr("\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r");
+    bios_putstr("\n\r\n\r\n\r");
+    screen_clear();
+    screen_reflush();
+
+    // Set the FIRST interrupt to kick things off
+    bios_set_timer(get_ticks() + TIMER_INTERVAL);
+
+    // Enable global interrupt here
+    enable_interrupt();
+
+    // --- Interrupt driven idle loop ---
+    while (1) {
+        enable_preempt();
+        asm volatile("wfi");
+    }
+
+    return 0;
+}
+

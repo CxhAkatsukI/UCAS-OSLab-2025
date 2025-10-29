@@ -17,6 +17,7 @@ int cmd_help(char *args);
 int cmd_write_batch(char *args);
 int cmd_exec_batch(char *args);
 int cmd_wrq(char *args);
+int cmd_twrq(char *args);
 
 #define NR_CMD (sizeof(cmd_table) / sizeof(cmd_table[0]))
 

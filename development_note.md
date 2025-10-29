@@ -1539,3 +1539,260 @@ void check_sleeping(void)
 #endif // __DB_PRINT_H__
 ```
 
+## Task 4
+
+### Understanding the Big Picture
+
+#### **The Full Execution Flow of a Timer Interrupt**
+
+This flow assumes the kernel has already been initialized and the twrq command has been run. A user task (e.g., fly) is currently executing in User Mode.
+
+**Phase 1: The Interrupt (Hardware Action)**
+
+1.  **Timer Expires**: The CPU's internal `mtime` register becomes greater than or equal to the `mtimecmp` register (which was set by a previous `bios_set_timer` call).
+2.  **Trap is Triggered**: A hardware timer interrupt is generated.
+3.  **CPU State Change (Atomic Hardware Sequence)**:
+    *   The CPU automatically switches from User Mode to Supervisor Mode.
+    *   It disables global interrupts by clearing the `SIE` bit in the `sstatus` register. The previous value of `SIE` is saved into the `SPIE` bit.
+    *   The address of the interrupted instruction in the `fly` task is saved into the `sepc` (Supervisor Exception PC) register.
+    *   The `scause` register is set to `0x8000000000000005`, indicating an interrupt (most significant bit is 1) of type "supervisor timer interrupt" (code 5).
+    *   The CPU jumps to the address stored in the `stvec` CSR, which you have set to `exception_handler_entry`.
+
+**Phase 2: Kernel Trap Entry (Assembly)**
+
+4.  **`exception_handler_entry` (`entry.S`)**:
+    *   The first instruction, `csrrw sp, sscratch, sp`, executes. It atomically swaps the user task's stack pointer (currently in `sp`) with the kernel stack pointer for this task (which was primed in `sscratch` before the last `sret`). The CPU is now safely operating on the kernel stack.
+    *   The `SAVE_CONTEXT` macro runs, pushing all of the `fly` task's general-purpose registers onto this kernel stack, creating a complete `regs_context_t` frame.
+    *   The address of `ret_from_exception` is loaded into the `ra` register. This is crucial for the return path.
+    *   The arguments for the C handler are prepared: `a0` gets the pointer to the saved context (`sp`), `a1` gets `stval`, and `a2` gets `scause`.
+    *   `jalr x0, t0, 0` is executed, jumping to the `interrupt_helper` function in C.
+
+**Phase 3: C-Level Interrupt Handling**
+
+5.  **`interrupt_helper` (`irq.c`)**:
+    *   It inspects `scause` (`0x8000000000000005`).
+    *   It sees the interrupt bit is set, so it uses the `irq_table`.
+    *   It extracts the exception code (5) and calls `irq_table[5]`, which points to `handle_irq_timer`.
+
+6.  **`handle_irq_timer` (`irq.c`)**:
+    *   **Resets the Timer**: It immediately calls `bios_set_timer(get_ticks() + TIMER_INTERVAL)`. This "re-arms" the timer, ensuring another interrupt will happen in the future. This is the most critical step to prevent an interrupt storm.
+    *   **Invokes the Scheduler**: It calls `do_scheduler()`. This is the act of preemption.
+
+7.  **`do_scheduler` (`sched.c`)**:
+    *   It calls `check_sleeping()` to wake up any tasks from the `sleep_queue`.
+    *   It gets the `current_running` PCB (which is `fly`'s PCB).
+    *   It sees `fly`'s status is `TASK_RUNNING`, so it changes it to `TASK_READY` and adds it to the end of the `ready_queue`.
+    *   It dequeues the next task from the front of the `ready_queue` (e.g., `print1`'s PCB).
+    *   It updates the global `current_running` pointer to point to `print1`'s PCB.
+    *   It calls `switch_to(fly_pcb, print1_pcb)`.
+
+**Phase 4: Context Switch and Return (Assembly)**
+
+8.  **`switch_to` (`entry.S`)**:
+    *   Saves the callee-saved registers (kernel context) of the outgoing task (`fly`) onto its kernel stack.
+    *   Loads the kernel stack pointer (`sp`) of the incoming task (`print1`) from its PCB.
+    *   Sets the `tp` register to point to the incoming task's PCB (`print1_pcb`).
+    *   Restores the callee-saved registers of the incoming task (`print1`).
+    *   Executes `jr ra`, which jumps to the `ra` that was saved on `print1`'s stack. Since `print1` was previously in the ready queue, its `ra` points to `ret_from_exception`.
+
+9.  **`ret_from_exception` (`entry.S`)**:
+    *   The CPU is now executing in the context of the new task (`print1`), on `print1`'s kernel stack.
+    *   The `RESTORE_CONTEXT` macro runs, loading `print1`'s saved user registers from its exception frame.
+    *   `sret` is executed.
+
+**Phase 5: Resuming a New Task (Hardware Action)**
+
+10. **`sret` Hardware Magic**:
+    *   The CPU restores the state from the (now `print1`'s) CSRs.
+    *   It jumps to the address in `print1`'s `sepc`.
+    *   It switches back to User Mode.
+    *   It re-enables interrupts (`sstatus.SIE` is restored from `SPIE`).
+
+### Key Concepts Implemented & Explored:
+
+*   **Preemption vs. Cooperation**: Understanding the fundamental difference between a scheduler that relies on tasks to voluntarily yield (cooperative) and one that uses hardware interrupts to enforce time slices (preemptive).
+*   **Asynchronous Traps**: Learning to handle interrupts that can occur at any time, which introduces new challenges related to concurrency and system state consistency.
+*   **RISC-V Timer Interrupts**: Interacting with the RISC-V timer mechanism, including setting timers and handling the specific trap associated with them.
+*   **Interrupt Configuration (CSRs)**: Correctly configuring the `sie` (Supervisor Interrupt Enable) and `sstatus` (Supervisor Status) registers to enable timer interrupts at both the specific (timer) and global (supervisor) levels.
+*   **Idle State (`wfi`)**: Using the "Wait For Interrupt" instruction to create an efficient idle loop for the kernel, allowing the CPU to enter a low-power state when no tasks are ready to run, instead of busy-waiting.
+
+### Implementation Details:
+
+*   **Interrupt Controller Setup (`trap.S`)**:
+    *   Modified `setup_exception` to enable supervisor-level timer interrupts system-wide by setting the `SIE_STIE` bit (bit 5) in the `sie` CSR. This was done once at kernel initialization.
+
+```nasm
+// In trap.S
+ENTRY(setup_exception)
+
+  /* TODO: [p2-task3] save exception_handler_entry into STVEC */
+  la t0, exception_handler_entry
+  csrw stvec, t0
+
+  /* TODO: [p2-task4] enable interrupts globally */
+
+  // Global interrupt will be handled in `cmd_twrq`
+  // Enable Supervisor Timer Interrupts
+  li t0, SIE_STIE
+  csrs sie, t0
+
+ENDPROC(setup_exception)
+```
+
+*   **Timer Interrupt Handler (`irq.c`)**:
+    *   **Registration**: In `init_exception`, the `irq_table` was populated to map the timer interrupt code (`IRQC_S_TIMER`) to our new C-level handler, `handle_irq_timer`.
+    *   **Implementation**: The `handle_irq_timer` function was created to perform the two essential actions of a preemptive tick:
+        1.  **Reset the Timer**: It immediately sets the next timer interrupt by calling `bios_set_timer(get_ticks() + TIMER_INTERVAL)`. This is crucial to prevent an "interrupt storm".
+        2.  **Invoke the Scheduler**: It calls `do_scheduler()` to preempt the currently running task and select a new one to run.
+
+```
+// In irq.c
+void handle_irq_timer(regs_context_t *regs, uint64_t stval, uint64_t scause)
+{
+    // TODO: [p2-task4] clock interrupt handler.
+    // Note: use bios_set_timer to reset the timer and remember to reschedule
+    bios_set_timer(get_ticks() + TIMER_INTERVAL);
+    do_scheduler();
+}
+
+void init_exception()
+{
+    /* TODO: [p2-task3] initialize exc_table */
+    /* NOTE: handle_syscall, handle_other, etc.*/
+    exc_table[EXCC_SYSCALL] = (handler_t)&handle_syscall;
+
+    /* TODO: [p2-task4] initialize irq_table */
+    /* NOTE: handle_int, handle_other, etc.*/
+    irq_table[IRQC_S_TIMER] = (handler_t)&handle_irq_timer;
+
+    /* TODO: [p2-task3] set up the entrypoint of exceptions */
+    setup_exception();
+}
+```
+
+*   **Preemptive Scheduler Activation (`cmd.c`)**:
+    *   A new command, `twrq`, was created to act as the entry point for preemptive mode.
+    *   The `twrq` handler first loads all specified user tasks into the `ready_queue` (same as `wrq`).
+    *   It then kicks off the entire preemption process by:
+        1.  Setting the very first timer interrupt.
+        2.  Enabling global interrupts via the `enable_interrupt()` function. This was the final step before idling, ensuring the kernel was fully ready.
+        3.  Entering an infinite `while(1) { asm volatile("wfi"); }` loop, making the main kernel thread an efficient, interrupt-driven idle task.
+*   **Test Program Modification**:
+    *   To prove true preemption, all `sys_yield()` calls were commented out of the user test programs (`fly`, `print1`, `lock1`, etc.). This ensured that context switches were driven exclusively by the timer interrupt, not by voluntary task cooperation.
+
+
+```
+// In cmd.c
+/**
+ * @brief Command handler to write multiple programs into the ready queue and enabling timer interrupt.
+ *
+ * This command initializes PCBs for each specified task and adds them
+ * to the ready queue for scheduling.
+ *
+ * @param args A space-separated string of task names to load into the ready queue.
+ * @return Always returns 0.
+ */
+int cmd_twrq(char *args) {
+    char parsed_names[MAX_BATCH_TASKS][MAX_NAME_LEN];
+    int num_parsed_tasks;
+
+    // Check for wildcard '*', if so, load all tasks
+    if (args != NULL && strcmp(args, "*") == 0) {
+        num_parsed_tasks = 12;
+        char *all_tasks[] = {"fly", "fly1", "fly2", "fly3", "fly4", "fly5", "lock1", "lock2", "print1", "print2", "sleep", "timer"};
+        for (int i = 0; i < num_parsed_tasks; ++i) {
+            strncpy(parsed_names[i], all_tasks[i], MAX_NAME_LEN);
+        }
+    } else {
+        // Check for empty arguments
+        if (args == NULL || *args == '\0') {
+            bios_putstr(ANSI_FMT("ERROR: Usage: twrq <task_name1> <task_name2> ... or twrq *\n\r", ANSI_BG_RED));
+            return 0;
+        }
+        // Tokenize the input arguments into individual task names
+        num_parsed_tasks = tokenize_string(args, parsed_names, MAX_BATCH_TASKS);
+    }
+
+    if (num_parsed_tasks <= 0) {
+        bios_putstr(ANSI_FMT("ERROR: No tasks provided for demo.", ANSI_BG_RED));
+        bios_putstr(ANSI_FMT("\n\r", ANSI_NONE));
+        return 0;
+    }
+
+    // --- Initialize PCBs and add them to the ready_queue ---
+    list_init(&ready_queue); // the list initialized in main.c shall be invalidated
+    ptr_t next_task_addr = TASK_MEM_BASE;
+    for (int i = 0; i < num_parsed_tasks; ++i) {
+        int task_idx = search_task_name(tasknum, parsed_names[i]);
+        if (task_idx == -1) {
+            bios_putstr(ANSI_FMT("ERROR: Invalid task name in arguments: ", ANSI_BG_RED));
+            bios_putstr(parsed_names[i]);
+            bios_putstr(ANSI_FMT("\n\r", ANSI_NONE));
+            return 0; // Abort
+        }
+
+        // Get a free PCB
+        pcb_t *new_pcb = &pcb[process_id];
+
+        // Load the task into memory
+        ptr_t entry_point = load_task_img(tasks[task_idx].name, tasknum, next_task_addr);
+
+        // Initialize the PCB
+        new_pcb->kernel_sp = allocKernelPage(KERNEL_STACK_PAGES) + KERNEL_STACK_PAGES * PAGE_SIZE;
+        new_pcb->user_sp = allocUserPage(USER_STACK_PAGES) + USER_STACK_PAGES * PAGE_SIZE;
+        new_pcb->pid = process_id++;
+        new_pcb->status = TASK_READY;
+        new_pcb->cursor_x = 0;
+        new_pcb->cursor_y = i; // Give each task its own line
+
+        // Initialize the fake context on the stack
+        init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, new_pcb);
+
+        // Add the initialized PCB to the ready queue
+        list_add_tail(&new_pcb->list, &ready_queue);
+
+        // Update the next available task address, page-aligned
+        next_task_addr += tasks[task_idx].byte_size;
+        next_task_addr = (next_task_addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    }
+
+    bios_putstr(ANSI_FMT("Info: Starting scheduler...\n\r", ANSI_FG_GREEN));
+
+    // Enough newlines to clear the screen
+    // (don't know how to utilize screen_clear and screen_reflush API)
+    bios_putstr("\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r");
+    bios_putstr("\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r");
+    bios_putstr("\n\r\n\r\n\r");
+    screen_clear();
+    screen_reflush();
+
+    // Set the FIRST interrupt to kick things off
+    bios_set_timer(get_ticks() + TIMER_INTERVAL);
+
+    // Enable global interrupt here
+    enable_interrupt();
+
+    // --- Interrupt driven idle loop ---
+    while (1) {
+        enable_preempt();
+        asm volatile("wfi");
+    }
+
+    return 0;
+}
+```
+
+### 4. Key Debugging Challenges & Learnings:
+
+*   **The "Interrupt Storm" Bug**: The initial implementation of `handle_irq_timer` used `bios_set_timer(TIMER_INTERVAL)`, which set an absolute (and long-passed) time, causing an infinite cascade of interrupts and an immediate stack overflow. This was fixed by setting the timer relative to the current time: `get_ticks() + TIMER_INTERVAL`.
+*   **The S-Mode Trap & `sscratch` Initialization**: The most critical bug was a Store/AMO access fault on the very first timer interrupt. Through methodical GDB debugging, we discovered:
+    *   The first interrupt was an S-Mode to S-Mode trap (from the `wfi` idle loop).
+    *   The `exception_handler_entry` unconditionally tried to swap stacks using `sscratch`, but `sscratch` had never been initialized for the idle task (`pid0_pcb`).
+    *   This loaded a garbage value into `sp`, causing the handler to crash on its first attempt to write to the stack.
+    *   **Solution**: We fixed this by priming `sscratch` with the idle task's stack pointer (`pid0_stack`) in `main.c` before any interrupts were enabled. This made the first S-Mode trap safe.
+*   **Systematic Debugging**: This task reinforced the importance of a systematic debugging process: analyzing error codes, forming a hypothesis (stack overflow), using tools to gather evidence (GDB, `printl`), identifying contradictions, and refining the hypothesis until the true root cause was found.
+
+### 5. Final Result
+
+The kernel now supports a fully preemptive, time-sliced multitasking scheduler. User programs run concurrently and are switched automatically by the hardware timer interrupt, creating a more robust and modern operating system architecture. The `twrq` command provides a clean entry point to this new execution mode.
+

@@ -306,7 +306,7 @@ int main(void)
 
     // TODO: [p2-task4] Setup timer interrupt and enable all interrupt globally
     // NOTE: The function of sstatus.sie is different from sie's
-    
+   
 
 
     // TODO: Load tasks by either task id [p1-task3] or task name [p1-task4],
@@ -334,9 +334,13 @@ int main(void)
 
     // Print logo on startup
     if (*(short *)(LOGO_HAS_PRINTED) == 0) {
-        print_logo();
+        if (CONFIG_PRINT_LOGO)
+            print_logo();
         *(short *)(LOGO_HAS_PRINTED) = 1;
     }
+
+    // Prime sscratch with the idle task's kernel stack for the first trap
+    asm volatile("csrw sscratch, %0" : : "r"(pid0_stack));
 
     // Run main command parsing and executing loop
     run_command_loop();

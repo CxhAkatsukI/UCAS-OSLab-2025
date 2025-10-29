@@ -9,4 +9,9 @@ ENTRY(setup_exception)
 
   /* TODO: [p2-task4] enable interrupts globally */
 
+  // Global interrupt will be handled in `cmd_twrq`
+  // Enable Supervisor Timer Interrupts
+  li t0, SIE_STIE
+  csrs sie, t0
+
 ENDPROC(setup_exception)

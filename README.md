@@ -1,79 +1,53 @@
-# Project 2, Task 3: True System Calls and Privilege Separation
+### Project 2, Task 4: Timer Interrupts and Preemptive Scheduling
 
-## 1. Objective
+#### 1. Objective
 
-The primary objective of Task 3 was to implement a robust system call mechanism with true privilege separation in our RISC-V operating system. This involved transitioning user applications from running in the same privilege level as the kernel to executing in User Mode (U-Mode), while the kernel operates in Supervisor Mode (S-Mode). All requests from user programs for kernel services must now be mediated through the `ecall` instruction, ensuring system stability and security.
+The primary goal of Task 4 was to evolve our operating system from a cooperative multitasking model to a fully preemptive one. This was accomplished by implementing and handling hardware timer interrupts, which allows the kernel to forcibly regain control from running tasks at regular intervals. This ensures fair CPU time allocation, prevents any single task from monopolizing the system, and forms the foundation of a modern, robust multitasking kernel.
 
-## 2. Key Concepts Implemented & Explored
+#### 2. Key Concepts Implemented & Explored
 
-*   **Privilege Levels:** Deep understanding and implementation of the distinction between User Mode (U-Mode) for applications and Supervisor Mode (S-Mode) for the kernel.
-*   **RISC-V Control and Status Registers (CSRs):** Extensive use of `stvec`, `sstatus`, `sepc`, `scause`, `sscratch`, `medeleg` for managing exceptions and interrupts.
-*   **`ecall` Instruction:** The fundamental instruction used by user programs to trigger a system call, causing a trap into S-Mode.
-*   **`sret` Instruction:** The instruction used by the kernel to return from an exception, restoring the previous privilege level (U-Mode) and execution context.
-*   **Exception Frame:** A structured area on the kernel stack used to save the complete CPU state (general-purpose registers and CSRs) of a user program when a trap occurs.
-*   **Kernel Stack vs. User Stack:** Maintaining separate stack spaces for kernel and user execution contexts.
-*   **Task States:** Implementation of `TASK_BLOCKED` and `TASK_READY` states for sleeping tasks.
-*   **Non-Preemptive Scheduling:** Continued use of cooperative scheduling, with `sys_yield` and `sys_sleep` allowing tasks to voluntarily relinquish the CPU.
+*   **Preemptive vs. Cooperative Scheduling**: Transitioned from a model where tasks must voluntarily yield (`sys_yield`) to one where the kernel can interrupt and reschedule tasks at any time.
+*   **Asynchronous Traps**: Mastered the handling of asynchronous hardware interrupts, which can occur at any point during a program's execution.
+*   **RISC-V Timer Mechanism**: Interacted with the RISC-V timer by setting future interrupt points and handling the resulting traps.
+*   **Interrupt Configuration (CSRs)**: Correctly configured the `sie` (Supervisor Interrupt Enable) and `sstatus` (Supervisor Status) registers to enable timer interrupts at both the specific source level (`SIE_STIE`) and the global supervisor level (`sstatus.SIE`).
+*   **Interrupt-Driven Idle State**: Implemented an efficient idle loop for the kernel using the `wfi` ("Wait For Interrupt") instruction, allowing the CPU to enter a low-power state when no tasks are ready to run.
 
-## 3. Implementation Details
+#### 3. Implementation Details
 
-This task involved significant modifications across multiple kernel components:
+This task built directly upon the exception handling framework established in Task 3.
 
-### a. Assembly Layer (`arch/riscv/kernel/entry.S`, `arch/riscv/kernel/trap.S`)
+**a. Interrupt Controller Setup (`trap.S`)**
 
-*   **`setup_exception` (`trap.S`):** Configured the `stvec` CSR to point to our `exception_handler_entry` in S-Mode, establishing the entry point for all traps.
-*   **`SAVE_CONTEXT` Macro (`entry.S`):**
-    *   Performs an atomic stack swap (`csrrw sp, sscratch, sp`) to switch from the user stack to a dedicated kernel stack upon trap entry.
-    *   Saves all user-mode general-purpose registers (x1-x31, excluding x0) and critical CSRs (`sstatus`, `sepc`, `scause`, `stval`) onto the kernel stack, forming the exception frame.
-    *   **Special Handling for `tp`:** The `tp` (thread pointer) register is not saved/restored as part of the user context in `SAVE_CONTEXT`/`RESTORE_CONTEXT` because it is exclusively managed by the kernel to point to `current_running`.
-*   **`RESTORE_CONTEXT` Macro (`entry.S`):**
-    *   The inverse of `SAVE_CONTEXT`. Restores all saved registers and CSRs from the kernel stack.
-    *   Avoids restoring `tp` from the saved user context to prevent overwriting the kernel's `tp`.
-*   **`exception_handler_entry` (`entry.S`):**
-    *   The hardware entry point for all traps. It calls `SAVE_CONTEXT`.
-    *   Sets the `ra` register to `ret_from_exception` to ensure proper return flow after C-level handling.
-    *   Passes the exception frame pointer (`regs`), `stval`, and `scause` as arguments to the C-level `interrupt_helper`.
-*   **`ret_from_exception` (`entry.S`):**
-    *   Calls `RESTORE_CONTEXT`.
-    *   Increments `sepc` by 4 for `ecall` exceptions (handled in `handle_syscall`) to ensure execution resumes after the `ecall` instruction.
-    *   Performs the final stack swap (`csrrw sp, sscratch, sp`) to return to the user stack.
-    *   Executes `sret` to return to the user program in U-Mode.
-*   **`switch_to` (`entry.S`):**
-    *   Modified to explicitly set the `tp` register to the `next_pcb` pointer (`mv tp, a1`) during a context switch. This ensures `tp` always points to the correct `current_running` PCB in kernel mode.
+*   The `setup_exception` function was enhanced to enable supervisor-level timer interrupts system-wide. This was achieved by setting the `SIE_STIE` bit (bit 5) in the `sie` CSR. This is a one-time setup that configures the kernel to listen for timer interrupts for its entire session.
 
-### b. C Kernel Layer (`kernel/irq/irq.c`, `kernel/syscall/syscall.c`, `kernel/sched/sched.c`, `init/main.c`)
+**b. Timer Interrupt Handler (`irq.c`)**
 
-*   **`init_exception` (`irq.c`):** Initialized the `exc_table` array, mapping `EXCC_SYSCALL` to the `handle_syscall` function.
-*   **`interrupt_helper` (`irq.c`):** The C-level trap dispatcher. It checks the `scause` register to differentiate between interrupts and exceptions, then calls the appropriate handler from `irq_table` or `exc_table`.
-*   **`handle_syscall` (`syscall.c`):**
-    *   Extracts the syscall number (from `regs->regs[17]`, i.e., `a7`) and arguments (from `regs->regs[10-15]`, i.e., `a0-a5`) from the saved exception frame.
-    *   Calls the corresponding kernel function via the `syscall` function pointer array.
-    *   Places the return value from the kernel function into `regs->regs[10]` (`a0`) for the user program.
-    *   Crucially, increments `regs->sepc` by 4 to ensure the user program resumes execution after the `ecall` instruction.
-*   **`init_syscall` (`main.c`):** Populated the global `syscall` array, mapping `SYSCALL_` constants to their respective kernel function implementations (e.g., `SYSCALL_YIELD` to `do_scheduler`, `SYSCALL_LOCK_ACQ` to `do_mutex_lock_acquire`).
-*   **`init_pcb_stack` (`sched.c`):** Configured the "fake" exception frame for newly created tasks to ensure they start correctly in U-Mode:
-    *   Set `sepc` to the task's entry point.
-    *   Set `sstatus` to return to U-Mode (SPP=0) with interrupts enabled (SPIE=1).
-    *   Set the user stack pointer (`regs->regs[2]`) to the task's allocated user stack.
-*   **`do_sleep` (`sched.c`):** Implemented to mark the `current_running` task as `TASK_BLOCKED`, set its `wakeup_time`, add it to the `sleep_queue`, and call `do_scheduler`.
-*   **`check_sleeping` (`time.c`):** Implemented to iterate through the `sleep_queue` and move tasks whose `wakeup_time` has passed back to the `ready_queue` using `do_unblock`. This function is called at the beginning of `do_scheduler`.
+*   **Registration**: In the `init_exception` function, the `irq_table` was populated to map the timer interrupt code (`IRQC_S_TIMER`) to our new C-level handler, `handle_irq_timer`.
+*   **Implementation (`handle_irq_timer`)**: This function contains the core logic for preemption:
+    1.  **Reset the Timer**: It immediately sets the next timer interrupt relative to the current time by calling `bios_set_timer(get_ticks() + TIMER_INTERVAL)`. This is a critical step to prevent an "interrupt storm" where the same interrupt fires repeatedly.
+    2.  **Invoke the Scheduler**: It calls `do_scheduler()`, forcibly preempting the currently running task and triggering a context switch.
 
-### c. User Library Layer (`tiny_libc/syscall.c`)
+**c. Preemptive Scheduler Activation (`cmd.c`)**
 
-*   **`invoke_syscall`:** The low-level interface for user programs. It uses inline assembly to load the syscall number into `a7` and arguments into `a0-a5`, executes `ecall`, and returns the value from `a0`.
-*   **`sys_*` wrappers:** All user-facing system call functions (e.g., `sys_yield`, `sys_move_cursor`, `sys_mutex_init`) were updated to call `invoke_syscall`.
+*   A new command, `twrq` (Timer Write to Ready Queue), was created to serve as the entry point for preemptive mode.
+*   The `twrq` handler first loads all specified user tasks into the `ready_queue`.
+*   It then initiates the preemptive scheduling loop by:
+    1.  Setting the very first timer interrupt to kick off the process.
+    2.  Enabling global interrupts via the `enable_interrupt()` function. This is done as the final step before idling to ensure the kernel is fully initialized and ready.
+    3.  Entering an infinite `while(1) { asm volatile("wfi"); }` loop, transforming the main kernel thread into an efficient, interrupt-driven idle task.
 
-## 4. Challenges & Learnings
+**d. Test Program Modification**
 
-*   **`tp` Register Management:** The `tp` register, designated as `current_running`, required careful handling. It must be correctly set to the kernel's `current_running` PCB upon entering an exception (via `switch_to` or explicit load in `exception_handler_entry`) and preserved across kernel C function calls. It should not be saved/restored as part of the user's context in `SAVE_CONTEXT`/`RESTORE_CONTEXT` to avoid corruption.
-*   **Linked List Corruption (Double-Delete):** A subtle bug in `check_sleeping` where `list_del` was called redundantly before `do_unblock`, leading to linked list corruption and `Store/AMO access fault`. This highlighted the importance of careful list manipulation.
-*   **Debugging Techniques:** Extensive use of GDB (breakpoints, `si`, `n`, `p`, `x`, `watch`) was crucial for tracing execution flow, inspecting registers, and pinpointing memory corruption. Custom `dbprint` macros were instrumental in providing real-time execution traces.
-*   **Build System Nuances:** Understanding how the assembler processes `.S` files and the implications of including C headers or referencing C variables from assembly.
+*   To verify true preemption, all `sys_yield()` calls were commented out of the user test programs (`fly`, `print1`, `lock1`, etc.). This ensures that context switches are driven exclusively by the timer interrupt, not by voluntary task cooperation.
 
-## 5. How to Run/Test
+#### 4. Key Debugging Challenges & Learnings
 
-*   Compile the kernel: `make all`
-*   Run the kernel with QEMU: `make run`
-*   At the `(cmd)` prompt, use the new `wrq` command:
-    *   To run specific tasks: `wrq print1 print2 fly lock1 lock2`
-    *   To run all available test tasks: `wrq *`
+*   **The "Interrupt Storm"**: The most significant logical bug was an "interrupt storm" caused by setting the timer to an absolute, long-passed value instead of a future value relative to the current time. This was fixed by changing `bios_set_timer(TIMER_INTERVAL)` to `bios_set_timer(get_ticks() + TIMER_INTERVAL)`.
+*   **S-Mode Trap and `sscratch` Initialization**: A critical boot-time crash (Store/AMO access fault) was traced to the very first timer interrupt.
+    *   **Cause**: The interrupt was an S-Mode to S-Mode trap (from the `wfi` idle loop). The `exception_handler_entry` unconditionally tried to swap stacks using `sscratch`, but `sscratch` had never been initialized for the idle task (`pid0_pcb`) and held a garbage value.
+    *   **Solution**: We fixed this by priming `sscratch` with the idle task's stack pointer (`pid0_stack`) in `main.c` before any interrupts were enabled. This made the initial S-Mode trap safe.
+*   **Systematic Debugging**: The process reinforced the necessity of a methodical debugging approach for complex concurrency issues, using GDB and custom print macros to trace execution, inspect CPU state (`scause`, `sepc`), and validate memory to pinpoint the root cause of faults.
+
+#### 5. Final Result
+
+The kernel now supports a fully preemptive, time-sliced multitasking scheduler. User programs run concurrently and are automatically context-switched by a hardware timer interrupt, creating a more robust and modern operating system architecture. The `twrq` command provides a clean entry point to this new execution mode, demonstrating true preemptive multitasking.
