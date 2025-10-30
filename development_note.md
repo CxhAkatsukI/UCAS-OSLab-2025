@@ -1645,29 +1645,29 @@ ENDPROC(setup_exception)
         1.  **Reset the Timer**: It immediately sets the next timer interrupt by calling `bios_set_timer(get_ticks() + TIMER_INTERVAL)`. This is crucial to prevent an "interrupt storm".
         2.  **Invoke the Scheduler**: It calls `do_scheduler()` to preempt the currently running task and select a new one to run.
 
-```
-// In irq.c
-void handle_irq_timer(regs_context_t *regs, uint64_t stval, uint64_t scause)
-{
-    // TODO: [p2-task4] clock interrupt handler.
-    // Note: use bios_set_timer to reset the timer and remember to reschedule
-    bios_set_timer(get_ticks() + TIMER_INTERVAL);
-    do_scheduler();
-}
+	```C
+	// In irq.c
+	void handle_irq_timer(regs_context_t *regs, uint64_t stval, uint64_t scause)
+	{
+	    // TODO: [p2-task4] clock interrupt handler.
+	    // Note: use bios_set_timer to reset the timer and remember to reschedule
+	    bios_set_timer(get_ticks() + TIMER_INTERVAL);
+	    do_scheduler();
+	}
 
-void init_exception()
-{
-    /* TODO: [p2-task3] initialize exc_table */
-    /* NOTE: handle_syscall, handle_other, etc.*/
-    exc_table[EXCC_SYSCALL] = (handler_t)&handle_syscall;
+	void init_exception()
+	{
+	    /* TODO: [p2-task3] initialize exc_table */
+	    /* NOTE: handle_syscall, handle_other, etc.*/
+	    exc_table[EXCC_SYSCALL] = (handler_t)&handle_syscall;
 
-    /* TODO: [p2-task4] initialize irq_table */
-    /* NOTE: handle_int, handle_other, etc.*/
-    irq_table[IRQC_S_TIMER] = (handler_t)&handle_irq_timer;
+	    /* TODO: [p2-task4] initialize irq_table */
+	    /* NOTE: handle_int, handle_other, etc.*/
+	    irq_table[IRQC_S_TIMER] = (handler_t)&handle_irq_timer;
 
-    /* TODO: [p2-task3] set up the entrypoint of exceptions */
-    setup_exception();
-}
+	    /* TODO: [p2-task3] set up the entrypoint of exceptions */
+	    setup_exception();
+	}
 ```
 
 *   **Preemptive Scheduler Activation (`cmd.c`)**:
@@ -1681,105 +1681,105 @@ void init_exception()
     *   To prove true preemption, all `sys_yield()` calls were commented out of the user test programs (`fly`, `print1`, `lock1`, etc.). This ensured that context switches were driven exclusively by the timer interrupt, not by voluntary task cooperation.
 
 
-```
-// In cmd.c
-/**
- * @brief Command handler to write multiple programs into the ready queue and enabling timer interrupt.
- *
- * This command initializes PCBs for each specified task and adds them
- * to the ready queue for scheduling.
- *
- * @param args A space-separated string of task names to load into the ready queue.
- * @return Always returns 0.
- */
-int cmd_twrq(char *args) {
-    char parsed_names[MAX_BATCH_TASKS][MAX_NAME_LEN];
-    int num_parsed_tasks;
-
-    // Check for wildcard '*', if so, load all tasks
-    if (args != NULL && strcmp(args, "*") == 0) {
-        num_parsed_tasks = 12;
-        char *all_tasks[] = {"fly", "fly1", "fly2", "fly3", "fly4", "fly5", "lock1", "lock2", "print1", "print2", "sleep", "timer"};
-        for (int i = 0; i < num_parsed_tasks; ++i) {
-            strncpy(parsed_names[i], all_tasks[i], MAX_NAME_LEN);
+	 ```C
+    // In cmd.c
+    /**
+     * @brief Command handler to write multiple programs into the ready queue and enabling timer interrupt.
+     *
+     * This command initializes PCBs for each specified task and adds them
+     * to the ready queue for scheduling.
+     *
+     * @param args A space-separated string of task names to load into the ready queue.
+     * @return Always returns 0.
+     */
+    int cmd_twrq(char *args) {
+        char parsed_names[MAX_BATCH_TASKS][MAX_NAME_LEN];
+        int num_parsed_tasks;
+    
+        // Check for wildcard '*', if so, load all tasks
+        if (args != NULL && strcmp(args, "*") == 0) {
+            num_parsed_tasks = 12;
+            char *all_tasks[] = {"fly", "fly1", "fly2", "fly3", "fly4", "fly5", "lock1", "lock2", "print1", "print2", "sleep", "timer"};
+            for (int i = 0; i < num_parsed_tasks; ++i) {
+                strncpy(parsed_names[i], all_tasks[i], MAX_NAME_LEN);
+            }
+        } else {
+            // Check for empty arguments
+            if (args == NULL || *args == '\0') {
+                bios_putstr(ANSI_FMT("ERROR: Usage: twrq <task_name1> <task_name2> ... or twrq *\n\r", ANSI_BG_RED));
+                return 0;
+            }
+            // Tokenize the input arguments into individual task names
+            num_parsed_tasks = tokenize_string(args, parsed_names, MAX_BATCH_TASKS);
         }
-    } else {
-        // Check for empty arguments
-        if (args == NULL || *args == '\0') {
-            bios_putstr(ANSI_FMT("ERROR: Usage: twrq <task_name1> <task_name2> ... or twrq *\n\r", ANSI_BG_RED));
+    
+        if (num_parsed_tasks <= 0) {
+            bios_putstr(ANSI_FMT("ERROR: No tasks provided for demo.", ANSI_BG_RED));
+            bios_putstr(ANSI_FMT("\n\r", ANSI_NONE));
             return 0;
         }
-        // Tokenize the input arguments into individual task names
-        num_parsed_tasks = tokenize_string(args, parsed_names, MAX_BATCH_TASKS);
-    }
-
-    if (num_parsed_tasks <= 0) {
-        bios_putstr(ANSI_FMT("ERROR: No tasks provided for demo.", ANSI_BG_RED));
-        bios_putstr(ANSI_FMT("\n\r", ANSI_NONE));
+    
+        // --- Initialize PCBs and add them to the ready_queue ---
+        list_init(&ready_queue); // the list initialized in main.c shall be invalidated
+        ptr_t next_task_addr = TASK_MEM_BASE;
+        for (int i = 0; i < num_parsed_tasks; ++i) {
+            int task_idx = search_task_name(tasknum, parsed_names[i]);
+            if (task_idx == -1) {
+                bios_putstr(ANSI_FMT("ERROR: Invalid task name in arguments: ", ANSI_BG_RED));
+                bios_putstr(parsed_names[i]);
+                bios_putstr(ANSI_FMT("\n\r", ANSI_NONE));
+                return 0; // Abort
+            }
+    
+            // Get a free PCB
+            pcb_t *new_pcb = &pcb[process_id];
+    
+            // Load the task into memory
+            ptr_t entry_point = load_task_img(tasks[task_idx].name, tasknum, next_task_addr);
+    
+            // Initialize the PCB
+            new_pcb->kernel_sp = allocKernelPage(KERNEL_STACK_PAGES) + KERNEL_STACK_PAGES * PAGE_SIZE;
+            new_pcb->user_sp = allocUserPage(USER_STACK_PAGES) + USER_STACK_PAGES * PAGE_SIZE;
+            new_pcb->pid = process_id++;
+            new_pcb->status = TASK_READY;
+            new_pcb->cursor_x = 0;
+            new_pcb->cursor_y = i; // Give each task its own line
+    
+            // Initialize the fake context on the stack
+            init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, new_pcb);
+    
+            // Add the initialized PCB to the ready queue
+            list_add_tail(&new_pcb->list, &ready_queue);
+    
+            // Update the next available task address, page-aligned
+            next_task_addr += tasks[task_idx].byte_size;
+            next_task_addr = (next_task_addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+        }
+    
+        bios_putstr(ANSI_FMT("Info: Starting scheduler...\n\r", ANSI_FG_GREEN));
+    
+        // Enough newlines to clear the screen
+        // (don't know how to utilize screen_clear and screen_reflush API)
+        bios_putstr("\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r");
+        bios_putstr("\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r");
+        bios_putstr("\n\r\n\r\n\r");
+        screen_clear();
+        screen_reflush();
+    
+        // Set the FIRST interrupt to kick things off
+        bios_set_timer(get_ticks() + TIMER_INTERVAL);
+    
+        // Enable global interrupt here
+        enable_interrupt();
+    
+        // --- Interrupt driven idle loop ---
+        while (1) {
+            enable_preempt();
+            asm volatile("wfi");
+        }
+    
         return 0;
     }
-
-    // --- Initialize PCBs and add them to the ready_queue ---
-    list_init(&ready_queue); // the list initialized in main.c shall be invalidated
-    ptr_t next_task_addr = TASK_MEM_BASE;
-    for (int i = 0; i < num_parsed_tasks; ++i) {
-        int task_idx = search_task_name(tasknum, parsed_names[i]);
-        if (task_idx == -1) {
-            bios_putstr(ANSI_FMT("ERROR: Invalid task name in arguments: ", ANSI_BG_RED));
-            bios_putstr(parsed_names[i]);
-            bios_putstr(ANSI_FMT("\n\r", ANSI_NONE));
-            return 0; // Abort
-        }
-
-        // Get a free PCB
-        pcb_t *new_pcb = &pcb[process_id];
-
-        // Load the task into memory
-        ptr_t entry_point = load_task_img(tasks[task_idx].name, tasknum, next_task_addr);
-
-        // Initialize the PCB
-        new_pcb->kernel_sp = allocKernelPage(KERNEL_STACK_PAGES) + KERNEL_STACK_PAGES * PAGE_SIZE;
-        new_pcb->user_sp = allocUserPage(USER_STACK_PAGES) + USER_STACK_PAGES * PAGE_SIZE;
-        new_pcb->pid = process_id++;
-        new_pcb->status = TASK_READY;
-        new_pcb->cursor_x = 0;
-        new_pcb->cursor_y = i; // Give each task its own line
-
-        // Initialize the fake context on the stack
-        init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, new_pcb);
-
-        // Add the initialized PCB to the ready queue
-        list_add_tail(&new_pcb->list, &ready_queue);
-
-        // Update the next available task address, page-aligned
-        next_task_addr += tasks[task_idx].byte_size;
-        next_task_addr = (next_task_addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-    }
-
-    bios_putstr(ANSI_FMT("Info: Starting scheduler...\n\r", ANSI_FG_GREEN));
-
-    // Enough newlines to clear the screen
-    // (don't know how to utilize screen_clear and screen_reflush API)
-    bios_putstr("\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r");
-    bios_putstr("\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r");
-    bios_putstr("\n\r\n\r\n\r");
-    screen_clear();
-    screen_reflush();
-
-    // Set the FIRST interrupt to kick things off
-    bios_set_timer(get_ticks() + TIMER_INTERVAL);
-
-    // Enable global interrupt here
-    enable_interrupt();
-
-    // --- Interrupt driven idle loop ---
-    while (1) {
-        enable_preempt();
-        asm volatile("wfi");
-    }
-
-    return 0;
-}
 ```
 
 ### 4. Key Debugging Challenges & Learnings:
@@ -1795,4 +1795,295 @@ int cmd_twrq(char *args) {
 ### 5. Final Result
 
 The kernel now supports a fully preemptive, time-sliced multitasking scheduler. User programs run concurrently and are switched automatically by the hardware timer interrupt, creating a more robust and modern operating system architecture. The `twrq` command provides a clean entry point to this new execution mode.
+
+## Project 2, Task 5: Complex Scheduling Algorithm
+
+### 1. Objective
+
+The goal of this task was to implement a complex, dynamic scheduling algorithm capable of managing multiple processes with varying execution speeds. The scheduler needed to ensure that all processes could synchronize their progress at predefined checkpoints and at the end of a full run, all while maintaining the visual effect of continuous movement (i.e., no process should appear to completely stop). This required moving beyond a simple round-robin or static priority scheduler to one that could intelligently allocate CPU time based on the real-time progress of each task.
+
+### 2. Key Concepts & Challenges
+
+To solve this, a lap-aware, proportional timeslice scheduling algorithm was developed. This approach addresses several key challenges:
+
+*   **Proportional Timeslicing**: The core concept is to give more CPU time to tasks that are further behind. Instead of a fixed timeslice for every task, the duration of a task's run is made proportional to its `remaining_workload`.
+*   **Checkpoint Synchronization**: A "soft barrier" mechanism was needed. When a fast task reaches a checkpoint, it must be throttled to allow slower tasks to catch up, without being completely blocked.
+*   **Lap Synchronization**: A similar barrier was required at the end of a run. When a task finishes a lap and loops back, it must wait for all other tasks to finish the current lap before it begins the next one. This prevents it from unfairly getting a head start on the next lap.
+*   **Heuristic-Based State Tracking**: Since the kernel cannot know the internal state of a user program, it must infer state changes (like starting a new lap) by observing the data provided by the task, specifically the `remaining_workload`.
+
+### 3. Implementation Details
+
+The implementation was achieved through coordinated changes in the PCB structure, the scheduler, the system call handler, and the interrupt handler.
+
+#### a. PCB Modification (`include/os/sched.h`)
+
+To track progress across multiple runs, a new field was added to the Process Control Block:
+*   `int lap_count;`: This integer is initialized to 0 and tracks how many full laps a task has completed.
+
+#### b. Lap Detection (`kernel/sched/sched.c`)
+
+The kernel automatically detects when a task starts a new lap by using a heuristic within the `do_set_sche_workload` system call handler.
+*   When a task's workload suddenly jumps from a low value (near the end of a lap) to a high value (at the start of a new one), the kernel increments that task's `lap_count`.
+
+```c
+void do_set_sche_workload(int workload)
+{
+    // New lap detection
+    if (workload > current_running->remaining_workload + 60) {
+        current_running->lap_count++;
+    }
+    current_running->remaining_workload = workload;
+}
+```
+
+#### c. Timer and Scheduler Refactoring (`irq.c` & `sched.c`)
+
+To enable dynamic timeslices, control of the timer was moved from the interrupt handler to the scheduler.
+*   In `handle_irq_timer`: The static call to `bios_set_timer()` was made conditional, so it is skipped when `CONFIG_TIMESLICE_FINETUNING` is active.
+
+```c
+// In irq.c
+void handle_irq_timer(regs_context_t *regs, uint64_t stval, uint64_t scause)
+{
+    // TODO: [p2-task4] clock interrupt handler.
+    // Note: use bios_set_timer to reset the timer and remember to reschedule
+    if (!CONFIG_TIMESLICE_FINETUNING) {
+        bios_set_timer(get_ticks() + TIMER_INTERVAL);
+    }
+    do_scheduler();
+}
+```
+
+*   In `do_scheduler`: The call to `bios_set_timer()` was added after the next task to run has been chosen, allowing a custom timeslice to be set for that specific task.
+
+```c
+// Updated do_scheduler logic
+// Focus on the `CONFIG_TIMESLICE_FINETUNING` related logic
+// `DYNAMIC_PRIORITIZING` and `WORKLOAD_PRIORITIZING` cannot 
+// satisfy the requirement of task 5
+void do_scheduler(void)
+{
+    // TODO: [p2-task3] Check sleep queue to wake up PCBs
+    check_sleeping();
+
+    /************************************************************/
+    /* Do not touch this comment. Reserved for future projects. */
+    /************************************************************/
+
+    // [p2-task1] Modify the current_running pointer.
+    pcb_t *prev_running = current_running;
+    pcb_t *next_running;
+
+    if (prev_running->status == TASK_RUNNING) {
+        prev_running->status = TASK_READY;
+        list_add_tail(&prev_running->list, &ready_queue);
+    }
+
+#if PRIORITY_SCHEDULING == 1
+    // --- Task 5: Priority Scheduling Logic ---
+    if (list_is_empty(&ready_queue)) {
+        next_running = &pid0_pcb;
+    } else {
+        // 1. Find the task with the highest workload
+        list_node_t *current_node;
+        pcb_t *highest_priority_task = NULL;
+
+        // Dynamic prioritizing logic
+        int max_dynamic_priority = -1;
+        int task_dynamic_priority;
+
+        //Static remaining_workload logic
+        int max_remaining_workload = -1;
+        int min_remaining_workload = 100;
+        pcb_t *highest_workload_task = NULL;
+        pcb_t *lowest_workload_task = NULL;
+
+        // Lapcount awareness
+        int min_lap_count = 100000;
+        pcb_t *lowest_lapcount_task = NULL;
+
+
+        for (current_node = ready_queue.next; current_node != &ready_queue;
+             current_node = current_node->next) {
+            pcb_t *task = list_entry(current_node, pcb_t, list);
+
+            // Calculate task_dynamic_priority
+            task_dynamic_priority = task->remaining_workload + (get_ticks() - task->last_run_time) * AGING_FACTOR;
+
+            // Identify the task with the highest priority
+            if (task_dynamic_priority > max_dynamic_priority) {
+                max_dynamic_priority = task_dynamic_priority;
+                highest_priority_task = task;
+            }
+
+            // Identify the task with the highest workload
+            if (task->remaining_workload > max_remaining_workload) {
+                max_remaining_workload = task->remaining_workload;
+                highest_workload_task = task;
+            }
+
+            // Identify the task with the lowest workload
+            if (task->remaining_workload < min_remaining_workload) {
+                min_remaining_workload = task->remaining_workload;
+                lowest_workload_task = task;
+            }
+
+            // Identify the task with the min lap_count
+            if (task->lap_count < min_lap_count) {
+                min_lap_count = task->lap_count;
+                lowest_lapcount_task = task;
+            }
+
+        }
+
+        // Next running selection logic
+        if (CONFIG_DYNAMIC_PRIORITIZING) {
+            // Select highest_priority_task
+            next_running = highest_priority_task;
+        } else if (CONFIG_WORKLOAD_PRIORITIZING) {
+            // Select next_running based on remianing workload
+            if (max_remaining_workload - min_remaining_workload > 30) {
+                // Let the lowest_workload_task finish its run
+                next_running = lowest_workload_task;
+            } else {
+                // Select the highest_workload_task
+                next_running = highest_workload_task;
+            }
+        } else if (CONFIG_TIMESLICE_FINETUNING) {
+            // Remain Round-Robin logic in this case
+            next_running = list_entry(ready_queue.next, pcb_t, list);
+            // Ensure next_running is in current lap
+            if (next_running->lap_count > min_lap_count) {
+                next_running = lowest_lapcount_task;
+            }
+            uint64_t timeslice = calculate_timeslice(next_running, min_lap_count);
+            // Find terminating tasks
+            pcb_t *terminating_task = find_terminating_tasks(min_lap_count);
+            if (terminating_task) {
+                next_running = terminating_task;
+                timeslice = TIMER_INTERVAL;
+            }
+            bios_set_timer(get_ticks() + timeslice);
+        }
+
+        // 2. Remove it from the ready queue
+        list_del(&next_running->list);
+    }
+#else
+    // --- Original Round-Robin Logic ---
+    if (!list_is_empty(&ready_queue)) {
+        next_running = list_entry(ready_queue.next, pcb_t, list);
+        list_del(ready_queue.next);
+    } else {
+        next_running = &pid0_pcb;
+    }
+#endif
+
+    current_running = next_running;
+    current_running->status = TASK_RUNNING;
+
+    // Update prev_running's last run time
+    prev_running->last_run_time = get_ticks();
+
+    // [p2-task1] switch_to current_running
+    switch_to(prev_running, current_running);
+}
+```
+
+#### d. Lap-Aware Proportional Timeslice Algorithm (`sched.c`)
+
+The core logic resides in the `do_scheduler` and a new `calculate_timeslice` function, which activates when `CONFIG_TIMESLICE_FINETUNING` is enabled.
+
+1.  **Prioritize by Lap**: The scheduler first determines the current "race" by finding the minimum `lap_count` among all tasks in the `ready_queue`. It will only consider scheduling tasks that belong to this earliest lap, effectively creating a barrier that holds back tasks on future laps.
+
+```c
+// In sched.c
+// related logic could be found in previous codeblock
+```
+
+2.  **Select Task**: Within the current lap, the next task is chosen using a simple round-robin policy. A check ensures that if the chosen task is accidentally from a future lap, the selection falls back to a task from the correct `min_lap_count` group.
+
+```c
+// In sched.c
+// related logic could be found in previous codeblock
+```
+
+3.  **Calculate Proportional Timeslice**: The `calculate_timeslice` function computes the timeslice for the selected task.
+    *   It is lap-aware: to find the `max_workload`, it only considers other tasks that are also in the current `min_lap_count`.
+    *   It uses the formula `(workload / max_workload) * MAX_INTERVAL` to give tasks that are behind (higher workload) a longer timeslice.
+    *   The timeslice is clamped to a `MIN_INTERVAL` to guarantee that even tasks far ahead get a small amount of CPU time, ensuring they never appear to freeze.
+
+
+    ```C
+    // In sched.c
+    uint64_t calculate_timeslice(pcb_t *task_to_run, int min_lap_count)
+{
+    // If only one task is ready, or it's the idle task, use the default interval.
+    if (list_is_empty(&ready_queue) || task_to_run->pid == 0) {
+        return TIMER_INTERVAL;
+    }
+
+    // 1. Find the maximum workload among all tasks in the ready queue.
+    //    We also consider the task that is about to run.
+    int max_workload = task_to_run->remaining_workload;
+    list_node_t *node;
+    for (node = ready_queue.next; node != &ready_queue; node = node->next) {
+        pcb_t *task = list_entry(node, pcb_t, list);
+        if (task->remaining_workload > max_workload && task->lap_count == min_lap_count) {
+            max_workload = task->remaining_workload;
+        }
+    }
+
+    if (max_workload == 0) {
+        return TIMER_INTERVAL; // Avoid division by zero.
+    }
+
+    // 2. Define the bounds for our dynamic timeslice.
+    const uint64_t MIN_INTERVAL = TIMER_INTERVAL / 5; // e.g., 3000
+    const uint64_t MAX_INTERVAL = TIMER_INTERVAL * 5; // e.g., 75000
+
+    // 3. Calculate the proportional timeslice using integer arithmetic.
+    // A task with a higher workload gets a proportionally longer timeslice.
+    uint64_t new_interval = ((uint64_t)task_to_run->remaining_workload *
+        MAX_INTERVAL) / max_workload;
+
+    // 4. Clamp the value to our defined min/max bounds.
+    // This ensures that tasks far ahead still get a small amount of time to run,
+    // preventing them from stopping completely.
+    if (new_interval < MIN_INTERVAL) {
+        return MIN_INTERVAL;
+    }
+
+    // The upper bound is naturally handled by the formula, since
+    // task_to_run->remaining_workload cannot be greater than max_workload.
+    return new_interval;
+}
+```
+
+4.  **"Finish Line" Optimization**: A new helper function, `find_terminating_tasks`, was introduced. It identifies tasks that are about to finish the current lap (`remaining_workload <= 1`). The scheduler gives these tasks priority and a standard timeslice to ensure they cross the finish line smoothly.
+
+```C
+// In sched.c
+// Helping strategy: prioritizing the tasks that are about to terminate
+pcb_t *find_terminating_tasks(int min_lap_count)
+{
+    if (list_is_empty(&ready_queue)) {
+        return NULL;
+    }
+
+    list_node_t *node;
+    for (node = ready_queue.next; node != &ready_queue; node = node->next) {
+        pcb_t *task = list_entry(node, pcb_t, list);
+        if (task->remaining_workload <= 1 && task->lap_count == min_lap_count) {
+             return task;
+        }
+    }
+
+    return NULL;
+}
+```
+
+### 4. Final Result
+
+The kernel now features a sophisticated dynamic scheduler that successfully synchronizes multiple processes with different execution characteristics. It achieves this by creating "soft barriers" at checkpoints and lap boundaries, intelligently allocating CPU time based on each task's real-time progress. This was accomplished purely within the kernel by observing task behavior through a single system call, requiring no changes to the user programs themselves.
 

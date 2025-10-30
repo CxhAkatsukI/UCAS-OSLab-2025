@@ -128,7 +128,8 @@ void sys_sleep(uint32_t time)
 
 void sys_set_sche_workload(int remain_length)
 {
-    /* TODO: This function is not implemented in the skeleton code */
+    /* TODO: [p2-task5] used for setting remaining workload for a certain task */
+    invoke_syscall(SYSCALL_SET_WORKLOAD, (long)remain_length, 0, 0, 0, 0);
 }
 
 /************************************************************/

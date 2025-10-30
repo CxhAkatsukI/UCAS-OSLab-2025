@@ -809,8 +809,10 @@ int cmd_twrq(char *args) {
         new_pcb->user_sp = allocUserPage(USER_STACK_PAGES) + USER_STACK_PAGES * PAGE_SIZE;
         new_pcb->pid = process_id++;
         new_pcb->status = TASK_READY;
+        new_pcb->remaining_workload = 1; // An initial value, avoid the first task to starve the CPU resources
         new_pcb->cursor_x = 0;
         new_pcb->cursor_y = i; // Give each task its own line
+        new_pcb->lap_count = 0;
 
         // Initialize the fake context on the stack
         init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, new_pcb);

@@ -34,6 +34,21 @@
 
 #define NUM_MAX_TASK 16
 
+/* Enable priority scheduling */
+#define PRIORITY_SCHEDULING 1
+
+/* Enable Dynamic prioritizing */
+#define CONFIG_DYNAMIC_PRIORITIZING 0
+
+/* Enable workload based prioritizing */
+#define CONFIG_WORKLOAD_PRIORITIZING 0
+
+/* Enable timeslice finetuning logic */
+#define CONFIG_TIMESLICE_FINETUNING 1
+
+/* Aging factor used for scheduling */
+#define AGING_FACTOR 1
+
 /* used to save register infomation */
 typedef struct regs_context
 {
@@ -85,6 +100,17 @@ typedef struct pcb
     /* time(seconds) to wake up sleeping PCB */
     uint64_t wakeup_time;
 
+    // --- User Program Utilized Fields ---
+
+    /* remaining workload for a certain task */
+    int remaining_workload;
+
+    /* the task's last run time */
+    int last_run_time;
+
+    /* lap count for a certain task, e.g. fly */
+    int lap_count;
+
 } pcb_t;
 
 /* ready queue to run */
@@ -107,6 +133,9 @@ void do_sleep(uint32_t);
 
 void do_block(list_node_t *, list_head *queue);
 void do_unblock(list_node_t *);
+
+uint64_t calculate_timeslice(pcb_t *task_to_run, int min_lap_count);
+pcb_t *find_terminating_tasks(int min_lap_count);
 
 void init_pcb_stack(
     ptr_t kernel_stack, ptr_t user_stack, ptr_t entry_point,

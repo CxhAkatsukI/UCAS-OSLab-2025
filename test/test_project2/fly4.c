@@ -24,7 +24,7 @@ int main(void)
     while (1)
     {
         int clk = sys_get_tick();
-        remain_length = LENGTH;
+        remain_length = CHECK_POINT * 100;
         sys_set_sche_workload(remain_length);
 
 	sys_move_cursor(CHECK_POINT + 8, j);
@@ -34,8 +34,17 @@ int main(void)
 	sys_move_cursor(CHECK_POINT + 8, j + 2);
 	printf("%c", '|');
 
+        int flag = 1;
+
         for (int i = (60 - LENGTH) * CYCLE_PER_MOVE; i < 60 * CYCLE_PER_MOVE; i++)
         {
+            // Updated remain_length logic
+            if (flag == 1) {
+                if (i / CYCLE_PER_MOVE >= CHECK_POINT) {
+                    remain_length = LENGTH - CHECK_POINT;
+                    flag = 0;
+                }
+            }
             /* move */
             if(i % CYCLE_PER_MOVE == 0)
             {
@@ -49,7 +58,7 @@ int main(void)
                 printf("%s", plane3);
                 // sys_yield();
                 // for (int j=0;j<200000;j++); // wait
-                if (remain_length) remain_length--;
+                if (remain_length) remain_length-=(1 + flag * 99);
                 sys_set_sche_workload(remain_length);
             }
         }
