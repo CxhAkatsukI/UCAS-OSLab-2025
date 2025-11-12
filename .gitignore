@@ -1,5 +1,7 @@
-build/
+.vscode
+build
 .cache/
 createimage
 .asm-lsp.toml
 compile_commands.json
+*.txt
