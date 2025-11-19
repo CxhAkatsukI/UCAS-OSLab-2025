@@ -38,6 +38,9 @@ static void vt100_hidden_cursor()
 /* write a char */
 void screen_write_ch(char ch)
 {
+    // Get current_running from macro
+    pcb_t *current_running = CURRENT_RUNNING;
+
     if (ch == '\n')
     {
         current_running->cursor_x = 0;
@@ -47,6 +50,10 @@ void screen_write_ch(char ch)
     else if (ch == '\b' || ch == '\177')
     {	
         // TODO: [P3] support backspace here
+        if (current_running->cursor_x > 0) {
+            current_running->cursor_x--;
+            new_screen[SCREEN_LOC(current_running->cursor_x, current_running->cursor_y)] = ' ';
+        }
     }
     else
     {
@@ -71,6 +78,10 @@ void init_screen(void)
 
 void screen_clear(void)
 {
+
+    // Get current_running from macro
+    pcb_t *current_running = CURRENT_RUNNING;
+
     int i, j;
 	vt100_clear();
     for (i = 0; i < SCREEN_HEIGHT; i++)
@@ -88,6 +99,10 @@ void screen_clear(void)
 
 void screen_move_cursor(int x, int y)
 {
+
+    // Get current_running from macro
+    pcb_t *current_running = CURRENT_RUNNING;
+
     if (x >= SCREEN_WIDTH)
         x = SCREEN_WIDTH - 1;
     else if (x < 0)
@@ -122,6 +137,10 @@ void screen_write(char *buff)
  */
 void screen_reflush(void)
 {
+
+    // Get current_running from macro
+    pcb_t *current_running = CURRENT_RUNNING;
+
     int i, j;
 
     /* here to reflush screen buffer to serial port */

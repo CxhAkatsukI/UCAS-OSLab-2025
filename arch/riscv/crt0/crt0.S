@@ -7,6 +7,10 @@
 
 .section ".entry_function","ax"
 ENTRY(_start)
+    // Save argc (a0) and argv (a1) to the stack
+    addi sp, sp, -16
+    sd a0, 0(sp)
+    sd a1, 8(sp)
 
     /* TODO: [p1-task3] setup C runtime environment for the user program */
 
@@ -21,10 +25,26 @@ ENTRY(_start)
 
     // li sp, USER_STACKPTR
 
+    // Restore argc and argv before calling main
+    ld a0, 0(sp)
+    ld a1, 8(sp)
+    addi sp, sp, 16
+
     /* TODO: [p1-task3] enter main function */
 
-    la a0, main
-    jalr a0
+    la t0, main
+    jalr t0
+
+    /************************************************************/
+    /* TODO: [P3] call sys_exit */
+    /************************************************************/
+    li a7, 1 // Syscall number of SYSCALL_EXIT
+    li a0, 0
+    li a1, 0
+    li a2, 0
+    li a3, 0
+    li a4, 0
+    ecall
 
     // Save the application's return value (in a0) to batch_io_buffer
     la t0, BATCH_IO_BUFFER
@@ -34,9 +54,6 @@ ENTRY(_start)
     la t0, KERNEL_ENTRYPOINT
     jr t0
 
-    /************************************************************/
-    /* TODO: [P3] call sys_exit */
-    /************************************************************/
 // while(1) loop, unreachable here
 loop:
     wfi

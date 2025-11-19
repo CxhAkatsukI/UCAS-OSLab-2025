@@ -71,7 +71,7 @@ int main(int argc, char *argv[])
 
     // Launch two assistant processes, and pass mutex handles to them
     char location1[BUF_LEN];
-    assert(itoa(print_location + 1, location1, BUF_LEN, 10) != -1);
+    assert(itoa(print_location + 2, location1, BUF_LEN, 10) != -1);
 
     char *argv1[4] = {"ready_to_exit", location1, buf1, buf2};
     pid_t pid1 = sys_exec(argv1[0], 4, argv1);
@@ -79,7 +79,7 @@ int main(int argc, char *argv[])
     sys_sleep(1);  // wait enough time for task1 to acquire locks
     
     char location2[BUF_LEN];
-    assert(itoa(print_location + 2, location2, BUF_LEN, 10) != -1);
+    assert(itoa(print_location + 4, location2, BUF_LEN, 10) != -1);
 
     char *argv2[4] = {"wait_locks", location2, buf1, buf2};
     pid_t pid2 = sys_exec(argv2[0], 4, argv2);

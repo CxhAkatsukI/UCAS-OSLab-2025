@@ -7,12 +7,17 @@
 #include <csr.h>
 
 #define KERNEL_STACK		0x50500000
+#define S_KERNEL_STACK      0x50600000
 
 .section ".entry_function","ax"
 ENTRY(_start)
   /* Mask all interrupts */
   csrw CSR_SIE, zero
   csrw CSR_SIP, zero
+
+  // Core-based execution flow
+  csrr t0, CSR_MHARTID
+  bnez t0, s_start
 
   /* TODO: [p1-task2] clear BSS for flat non-ELF images */
   // a0: start pointer and `CURRENT` pointer
@@ -29,11 +34,30 @@ ENTRY(_start)
   // set up the stack pointer
   li sp, KERNEL_STACK
 
+  // set up the thread pointer to point to cpu_table[0]
+  la tp, cpu_table
+
   // jump to kernel `main` function
   jal main
 
 
   /* TODO: [p1-task2] setup C environment */
+
+  // Execution flow for secondary core
+  s_start:
+
+  // Set up the stack pointer
+  la sp, S_KERNEL_STACK
+
+  // Set up the thread pointer to point to cpu_table[1]
+  la tp, cpu_table
+
+  // Add the size of one cpu_t struct
+  // Note: Size may vary if the struct has more members
+  addi tp, tp, 8
+
+  // Jump to kernel main function
+  jal main
 
 
 loop:

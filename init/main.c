@@ -1,5 +1,6 @@
 #include "aesthetic.h"
 #include "os/list.h"
+#include "os/smp.h"
 #include <common.h>
 #include <asm.h>
 #include <asm/unistd.h>
@@ -20,15 +21,16 @@
 #include <cmd.h>
 #include <csr.h>
 
-#define KERNEL_STACK_PAGES 4
-#define USER_STACK_PAGES 1
-
 extern void ret_from_exception();
+
+// Flag to indicate whether core 1 has booted
+volatile int core1_booted = 0;
 
 // Task info array
 task_info_t tasks[TASK_MAXNUM];
 int tasknum;
 int g_batch_file_start_sector;
+
 // Global buffer for passing I/O between batch tasks
 uint64_t batch_io_buffer_val;
 
@@ -50,6 +52,7 @@ static void init_jmptab(void)
     jmptab[MUTEX_INIT]      = (long (*)())do_mutex_lock_init;
     jmptab[MUTEX_ACQ]       = (long (*)())do_mutex_lock_acquire;
     jmptab[MUTEX_RELEASE]   = (long (*)())do_mutex_lock_release;
+    jmptab[PRINTL]          = (long (*)())printl;
 
     // TODO: [p2-task1] (S-core) initialize system call table.
     jmptab[REFLUSH]         = (long (*)())screen_reflush;
@@ -58,28 +61,26 @@ static void init_jmptab(void)
 
 static void init_task_info(void)
 {
-    // TODO: [p1-task4] Init 'tasks' array via reading app-info sector
-    // NOTE: You need to get some related arguments from bootblock first
-    int tasknum = *(uint16_t *)TASK_NUM_LOC;
+    // 1. Read task_num and the start sector of task_info from the boot sector
+    tasknum = *(uint16_t *)TASK_NUM_LOC;
+    uint16_t task_info_start_sector = *(uint16_t *)TASK_INFO_START_SECTOR_LOC;
 
-    for (int i = 0; i < tasknum; i++) {
-        // Read the task information from the specified memory location
-        tasks[i] = *(task_info_t *)(TASK_INFO_LOC + i * sizeof(task_info_t));
+    // 2. Calculate the number of sectors the task_info array occupies
+    uint32_t task_info_size_bytes = tasknum * sizeof(task_info_t);
+    uint32_t task_info_size_sectors = NBYTES2SEC(task_info_size_bytes);
 
-        // Conditional debug output block
-        if (DEBUG == 1) {
-            // Set the text color to green
+    // 3. Read the task_info array from the SD card into the global `tasks` array
+    bios_sd_read((uintptr_t)tasks, task_info_size_sectors, task_info_start_sector);
+
+    // Conditional debug output block
+    if (DEBUG == 1) {
+        for (int i = 0; i < tasknum; i++) {
             bios_putstr(ANSI_FG_GREEN);
-
-            // Print the debug message in parts
             bios_putstr("DEBUG: task detected, '");
             bios_putstr(tasks[i].name);
             bios_putstr("'\n\r");
-
-            // Reset the color back to default
             bios_putstr(ANSI_NONE);
         }
-
     }
 }
 
@@ -171,7 +172,7 @@ uint64_t user_input_and_launch_task_handler(int tasknum) {
 
 /************************************************************/
 void init_pcb_stack(
-    ptr_t kernel_stack, ptr_t user_stack, ptr_t entry_point,
+    ptr_t kernel_stack, ptr_t user_stack, ptr_t entry_point, int argc, char *argv[],
     pcb_t *pcb)
 {
     /* TODO: [p2-task3] initialization of registers on kernel stack
@@ -188,11 +189,15 @@ void init_pcb_stack(
     }
 
     // Initialize ra and sp
-    pt_regs->regs[1] = 0; // ra
+    pt_regs->regs[1] = (reg_t)&fake_switch_to_context; // ra
     pt_regs->regs[2] = user_stack; // sp
 
+    // Initialize argc and argv
+    pt_regs->regs[10] = argc;
+    pt_regs->regs[11] = (reg_t)argv;
+
     // Initialie `sstatus`, `SPP` field is now 0; `SPIE` field is now 1
-    pt_regs->sstatus = SR_SPIE;
+    // pt_regs->sstatus = SR_SPIE;
 
     // Initialize `sepc` to the entry point
     pt_regs->sepc = entry_point;
@@ -249,112 +254,247 @@ static void init_pcb(void)
     // }
 
     /* TODO: [p2-task1] remember to initialize 'current_running' */
-    current_running = &pid0_pcb;
+    for (int i = 0; i < NUM_MAX_TASK; i++) {
+        pcb[i].status = TASK_UNUSED;
+        pcb[i].pid = -1;
+
+        // Pre-allocate a kernel and user stack for each PCB
+        pcb[i].kernel_stack_base = allocKernelPage(KERNEL_STACK_PAGES);
+        pcb[i].user_stack_base = allocUserPage(USER_STACK_PAGES);
+    }
+
+    // Populate the CPU array with default PCBs
+    cpu_table[0].current_running = &pid0_pcb;
+    cpu_table[1].current_running = &s_pid0_pcb;
+
+    // NOTE: Call init_pcb_stack() to set up switch_to context for default PCBs
+
+    // `current_running` setting is now handled by `set_current_running()` at the start of main
+    // current_running = cpu_table[0].current_running;
 }
 
 static void init_syscall(void)
 {
     // TODO: [p2-task3] initialize system call table.
+    syscall[SYSCALL_EXEC] = (long (*)())&do_exec;
+    syscall[SYSCALL_EXIT] = (long (*)())&do_exit;
     syscall[SYSCALL_SLEEP] = (long (*)())&do_sleep;
+    syscall[SYSCALL_KILL] = (long (*)())&do_kill;
+    syscall[SYSCALL_WAITPID] = (long (*)())&do_waitpid;
+    syscall[SYSCALL_PS] = (long (*)())&do_process_show;
+    syscall[SYSCALL_GETPID] = (long (*)())&do_getpid;
     syscall[SYSCALL_YIELD] = (long (*)())&do_scheduler;
+    syscall[SYSCALL_SET_WORKLOAD] = (long (*)())&do_set_sche_workload;
     syscall[SYSCALL_WRITE] = (long (*)())&screen_write;
+    syscall[SYSCALL_READCH] = (long (*)())&bios_getchar;
     syscall[SYSCALL_CURSOR] = (long (*)())&screen_move_cursor;
     syscall[SYSCALL_REFLUSH] = (long (*)())&screen_reflush;
+    syscall[SYSCALL_CLEAR] = (long (*)())&screen_clear;
     syscall[SYSCALL_GET_TIMEBASE] = (long (*)())&get_time_base;
     syscall[SYSCALL_GET_TICK] = (long (*)())&get_ticks;
     syscall[SYSCALL_LOCK_INIT] = (long (*)())&do_mutex_lock_init;
     syscall[SYSCALL_LOCK_ACQ] = (long (*)())&do_mutex_lock_acquire;
     syscall[SYSCALL_LOCK_RELEASE] = (long (*)())&do_mutex_lock_release;
-    syscall[SYSCALL_SET_WORKLOAD] = (long (*)())&do_set_sche_workload;
+    syscall[SYSCALL_BARR_INIT] = (long (*)())&do_barrier_init;
+    syscall[SYSCALL_BARR_WAIT] = (long (*)())&do_barrier_wait;
+    syscall[SYSCALL_BARR_DESTROY] = (long (*)())&do_barrier_destroy;
+    syscall[SYSCALL_COND_INIT] = (long (*)())&do_condition_init;
+    syscall[SYSCALL_COND_WAIT] = (long (*)())&do_condition_wait;
+    syscall[SYSCALL_COND_SIGNAL] = (long (*)())&do_condition_signal;
+    syscall[SYSCALL_COND_BROADCAST] = (long (*)())&do_condition_broadcast;
+    syscall[SYSCALL_COND_DESTROY] = (long (*)())&do_condition_destroy;
+    syscall[SYSCALL_MBOX_OPEN] = (long (*)())&do_mbox_open;
+    syscall[SYSCALL_MBOX_CLOSE] = (long (*)())&do_mbox_close;
+    syscall[SYSCALL_MBOX_SEND] = (long (*)())&do_mbox_send;
+    syscall[SYSCALL_MBOX_RECV] = (long (*)())&do_mbox_recv;
 }
 /************************************************************/
 
 int main(void)
 {
-    // Init jump table provided by kernel and bios(ΦωΦ)
-    init_jmptab();
+    // Get current CPU id
+    int core_id = get_current_cpu_id();
 
-    // Init task information (〃'▽'〃)
-    init_task_info();
+    if (core_id == 0) {
+        // Set core_id to 0 manually
+        core_id = 0;
 
-    // Print Welcome message
-    bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE));
-    bios_putstr("Hello OS!\n\r");
-    bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE));
+        // Init jump table provided by kernel and bios(ΦωΦ)
+        init_jmptab();
 
-    // Init Process Control Blocks |•'-'•) ✧
-    init_pcb();
-    printk("> [INIT] PCB initialization succeeded.\n");
+        // Init SMP
+        smp_init();
+        lock_kernel();
 
-    // Read CPU frequency (｡•ᴗ-)_
-    time_base = bios_read_fdt(TIMEBASE);
+        // Init task information (〃'▽'〃)
+        init_task_info();
 
-    // Init lock mechanism o(´^｀)o
-    init_locks();
-    printk("> [INIT] Lock mechanism initialization succeeded.\n");
+        // Print Welcome message
+        bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE));
+        bios_putstr("Hello OS!\n\r");
+        bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE));
 
-    // Init interrupt (^_^)
-    init_exception();
-    printk("> [INIT] Interrupt processing initialization succeeded.\n");
+        // Init Process Control Blocks |•'-'•) ✧
+        init_pcb();
+        printk("> [INIT] PCB initialization succeeded.\n");
 
-    // Init system call table (0_0)
-    init_syscall();
-    printk("> [INIT] System call initialized successfully.\n");
+        // Read CPU frequency (｡•ᴗ-)_
+        time_base = bios_read_fdt(TIMEBASE);
 
-    // Init screen (QAQ)
-    init_screen();
-    printk("> [INIT] SCREEN initialization succeeded.\n");
+        // Init lock mechanism o(´^｀)o
+        init_locks();
+        printk("> [INIT] Lock mechanism initialization succeeded.\n");
 
-    // TODO: [p2-task4] Setup timer interrupt and enable all interrupt globally
-    // NOTE: The function of sstatus.sie is different from sie's
-   
+        // Init interrupt (^_^)
+        init_exception();
+        printk("> [INIT] Interrupt processing initialization succeeded.\n");
+
+        // Init system call table (0_0)
+        init_syscall();
+        printk("> [INIT] System call initialized successfully.\n");
+
+        // Init screen (QAQ)
+        init_screen();
+        printk("> [INIT] SCREEN initialization succeeded.\n");
+
+        // --- Self Defined initializations ---
+
+        // Init barriers
+        init_barriers();
+        printk("> [INIT] BARRIERS initialization succeeded.\n");
+
+        // Init condition variables
+        init_conditions();
+        printk("> [INIT] CONDITION VARIALES initialization succeeded.\n");
+
+        // Init condition variables
+        init_mbox();
+        printk("> [INIT] MAILBOXES initialization succeeded.\n");
 
 
-    // TODO: Load tasks by either task id [p1-task3] or task name [p1-task4],
-    //   and then execute them.
+        // TODO: [p2-task4] Setup timer interrupt and enable all interrupt globally
+        // NOTE: The function of sstatus.sie is different from sie's
 
-    // Load the global tasknum from ram
-    tasknum = *((short *)TASK_NUM_LOC);
 
-    // Batch mode check and handler
-    bool in_batch_mode = *(bool *)(IN_BATCH_MODE_LOC);
-    int batch_task_index = *(short *)(BATCH_TASK_INDEX_LOC);
-    int batch_total_tasks = *(short *)(BATCH_TOTAL_TASKS_LOC);
-    batch_io_buffer_val = *(uint32_t *)(BATCH_IO_BUFFER_LOC);
-    g_batch_file_start_sector = *(short *)(BATCH_FILE_START_SECTOR_LOC); // tell cmd_write_batch where to write
-    kernel_batch_handler(in_batch_mode, batch_task_index, batch_total_tasks, batch_io_buffer_val);
 
-    // Construct the message with color
-    char temp_buf[] = "_____";
-    char *tasknum_buf = itoa(tasknum, temp_buf, 10);
-    bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE) ANSI_FMT("Loaded ", ANSI_FG_GREEN));
-    bios_putstr(ANSI_FG_CYAN);
-    bios_putstr(tasknum_buf);
-    bios_putstr(ANSI_NONE);
-    bios_putstr(ANSI_FMT(" tasks.\n", ANSI_FG_GREEN));
+        // TODO: Load tasks by either task id [p1-task3] or task name [p1-task4],
+        //   and then execute them.
 
-    // Print logo on startup
-    if (*(short *)(LOGO_HAS_PRINTED) == 0) {
-        if (CONFIG_PRINT_LOGO)
-            print_logo();
-        *(short *)(LOGO_HAS_PRINTED) = 1;
+        // Load the global tasknum from ram
+        tasknum = *((short *)TASK_NUM_LOC);
+
+        // Batch mode check and handler
+        bool in_batch_mode = *(bool *)(IN_BATCH_MODE_LOC);
+        int batch_task_index = *(short *)(BATCH_TASK_INDEX_LOC);
+        int batch_total_tasks = *(short *)(BATCH_TOTAL_TASKS_LOC);
+        batch_io_buffer_val = *(uint32_t *)(BATCH_IO_BUFFER_LOC);
+        g_batch_file_start_sector = *(short *)(BATCH_FILE_START_SECTOR_LOC); // tell cmd_write_batch where to write
+        kernel_batch_handler(in_batch_mode, batch_task_index, batch_total_tasks, batch_io_buffer_val);
+
+        // Construct the message with color
+        char temp_buf[] = "_____";
+        char *tasknum_buf = itoa(tasknum, temp_buf, 10);
+        bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE) ANSI_FMT("Loaded ", ANSI_FG_GREEN));
+        bios_putstr(ANSI_FG_CYAN);
+        bios_putstr(tasknum_buf);
+        bios_putstr(ANSI_NONE);
+        bios_putstr(ANSI_FMT(" tasks.\n", ANSI_FG_GREEN));
+
+        // Prime sscratch with the idle task's kernel stack for the first trap
+        asm volatile("csrw sscratch, %0" : : "r"(pid0_stack));
+
+        // Print multi-core message
+        char multi_core_buf[] = "_____";
+        char *corenum_buf = itoa(core_id, multi_core_buf, 10);
+        bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE) ANSI_FMT("Core ", ANSI_FG_GREEN));
+        bios_putstr(ANSI_FG_CYAN);
+        bios_putstr(corenum_buf);
+        bios_putstr(ANSI_NONE);
+        bios_putstr(ANSI_FMT(" activated. (AMD IS BETTER!)\n", ANSI_FG_GREEN));
+
+        // Wake up the secondary core
+        wakeup_other_hart();
+        unlock_kernel();
+
+        // Small delay to ensure core 1 acquires BKL
+        if (CONFIG_ENABLE_MULTICORE) {
+            while (!core1_booted) { /* spin */ }
+        }
+
+        // Re-compete the lock
+        lock_kernel();
+
+        // Get current_running from macro
+        pcb_t *current_running = CURRENT_RUNNING;
+
+        // Print logo on startup
+        if (*(short *)(LOGO_HAS_PRINTED) == 0) {
+            if (CONFIG_PRINT_LOGO) {
+                print_logo();
+                screen_move_cursor(current_running->cursor_x, current_running->cursor_y + 22);
+            }
+            *(short *)(LOGO_HAS_PRINTED) = 1;
+        }
+
+        // Unlock the lock, initialization is done
+        // WARNING: Prevent spinning while acquiring
+        // the BKL in exception_handler_entry
+        // unlock_kernel();
+
+        // Run main command parsing and executing loop
+        /* NOTE: A loop that never returns ...
+         * Since `run_command_loop()` never returns
+         * We shall activate core 1 BEFORE this
+         * function is called.
+         * */
+        run_command_loop();
+
+    } else {
+        // Set core_id to 1
+        core_id = 1;
+
+        // Lock kernel
+        lock_kernel();
+
+        // Set core1_booted flag
+        core1_booted = 1;
+
+        // Setup exception
+        setup_exception();
+
+        // Set timer for interrupt
+        bios_set_timer(get_ticks() + TIMER_INTERVAL);
+
+        // Prime sscratch with the idle task's kernel stack for the first trap
+        asm volatile("csrw sscratch, %0" : : "r"(s_pid0_stack));
+
+        // Print multi-core message
+        char multi_core_buf[] = "_____";
+        char *corenum_buf = itoa(core_id, multi_core_buf, 10);
+        bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE) ANSI_FMT("Core ", ANSI_FG_GREEN));
+        bios_putstr(ANSI_FG_CYAN);
+        bios_putstr(corenum_buf);
+        bios_putstr(ANSI_NONE);
+        bios_putstr(ANSI_FMT(" activated. (INTEL INSIDE!)\n", ANSI_FG_GREEN));
+
+        // Enable global interrupt here
+        enable_interrupt();
+
+        // Unlock kernel
+        unlock_kernel();
+
     }
 
-    // Prime sscratch with the idle task's kernel stack for the first trap
-    asm volatile("csrw sscratch, %0" : : "r"(pid0_stack));
-
-    // Run main command parsing and executing loop
-    run_command_loop();
-
     // Infinite while loop, where CPU stays in a low-power state (QAQQQQQQQQQQQ)
+    // NOTE: ONLY secondary core will reach here. Primary core's command loop never returns
     while (1)
     {
         // If you do non-preemptive scheduling, it's used to surrender control
-        do_scheduler();
+        // do_scheduler();
 
         // If you do preemptive scheduling, they're used to enable CSR_SIE and wfi
-        // enable_preempt();
-        // asm volatile("wfi");
+        enable_preempt();
+        asm volatile("wfi");
     }
 
     return 0;

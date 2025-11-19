@@ -29,6 +29,7 @@
 #define INCLUDE_LOCK_H_
 
 #include <os/list.h>
+#include <type.h>
 
 #define LOCK_NUM 16
 
@@ -60,12 +61,16 @@ void spin_lock_release(spin_lock_t *lock);
 int do_mutex_lock_init(int key);
 void do_mutex_lock_acquire(int mlock_idx);
 void do_mutex_lock_release(int mlock_idx);
+void do_mutex_lock_destroy(int mlock_idx);
 void do_set_sche_workload(int workload);
 
 /************************************************************/
 typedef struct barrier
 {
     // TODO [P3-TASK2 barrier]
+    int goal;
+    int count;
+    list_head block_queue;
 } barrier_t;
 
 #define BARRIER_NUM 16
@@ -77,7 +82,8 @@ void do_barrier_destroy(int bar_idx);
 
 typedef struct condition
 {
-    // TODO [P3-TASK2 condition]
+    // TODO: [P3-TASK2 condition]
+    list_head block_queue;
 } condition_t;
 
 #define CONDITION_NUM 16
@@ -91,7 +97,7 @@ void do_condition_destroy(int cond_idx);
 
 typedef struct semaphore
 {
-    // TODO [P3-TASK2 semaphore]
+    // TODO: [P3-TASK2 semaphore]
 } semaphore_t;
 
 #define SEMAPHORE_NUM 16
@@ -103,10 +109,27 @@ void do_semaphore_down(int sema_idx);
 void do_semaphore_destroy(int sema_idx);
 
 #define MAX_MBOX_LENGTH (64)
+#define MAX_MBOX_NAME_LEN 32
 
 typedef struct mailbox
 {
-    // TODO [P3-TASK2 mailbox]
+    // TODO: [P3-TASK2 mailbox]
+    char name[MAX_MBOX_LENGTH];
+
+    // Buffer and pointers
+    char buffer[MAX_MBOX_LENGTH];
+    int head;
+    int tail;
+
+    // How many bytes are currently in the buffer
+    int used_space;
+
+    // The lock to protect the mailbox's state
+    int lock_idx;
+
+    // Condition variables
+    int not_full_cond_idx;
+    int not_empty_cond_idx;
 } mailbox_t;
 
 #define MBOX_NUM 16

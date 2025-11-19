@@ -31,6 +31,7 @@
 #define MEM_SIZE 32
 #define PAGE_SIZE 4096 // 4K
 #define INIT_KERNEL_STACK 0x50500000
+#define S_INIT_KERNEL_STACK 0x50600000
 #define INIT_USER_STACK 0x52500000
 #define FREEMEM_KERNEL (INIT_KERNEL_STACK+PAGE_SIZE)
 #define FREEMEM_USER INIT_USER_STACK
@@ -41,5 +42,7 @@
 
 extern ptr_t allocKernelPage(int numPage);
 extern ptr_t allocUserPage(int numPage);
+extern void freeKernelPage(ptr_t baseAddr);
+extern void freeUserPage(ptr_t baseAddr);
 
 #endif /* MM_H */

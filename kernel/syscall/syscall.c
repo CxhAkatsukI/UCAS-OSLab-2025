@@ -1,11 +1,16 @@
+#include <asm/unistd.h>
 #include <sys/syscall.h>
 #include <os/dbprint.h>
+#include <os/debug.h>
 
 long (*syscall[NUM_SYSCALLS])();
 
 void handle_syscall(regs_context_t *regs, uint64_t interrupt, uint64_t cause)
 {
-    dbprint("Syscall num: %d\n", regs->regs[17]);
+    int syscall_num = regs->regs[17];
+    int disable_print = (syscall_num == SYSCALL_READCH);
+    if (!disable_print)
+        klog("Syscall num: %d\n", regs->regs[17]);
     /* TODO: [p2-task3] handle syscall exception */
     /**
      * HINT: call syscall function like syscall[fn](arg0, arg1, arg2),

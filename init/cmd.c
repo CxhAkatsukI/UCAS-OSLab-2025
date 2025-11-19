@@ -1,6 +1,7 @@
 #include "os/irq.h"
 #include "os/list.h"
 #include "os/sched.h"
+#include "os/smp.h"
 #include "os/time.h"
 #include "screen.h"
 #include <os/mm.h>
@@ -13,11 +14,11 @@
 #include <type.h>
 #include <cmd.h>
 
-#define KERNEL_STACK_PAGES 4
-#define USER_STACK_PAGES 1
-
 // define batch sequence buffer
 static char batch_sequence_buffer[BATCH_FILE_SIZE_SECTORS * SECTOR_SIZE];
+
+// determines the address of the next task
+ptr_t next_task_addr = TASK_MEM_BASE;
 
 // global state for batch processing
 bool in_batch_mode = false;
@@ -697,7 +698,8 @@ int cmd_wrq(char *args) {
 
     // --- Initialize PCBs and add them to the ready_queue ---
     list_init(&ready_queue); // the list initialized in main.c shall be invalidated
-    ptr_t next_task_addr = TASK_MEM_BASE;
+    next_task_addr = TASK_MEM_BASE;
+    memcpy((uint8_t *)&pcb[0], (uint8_t *)&pid0_pcb, sizeof(pcb_t));
     for (int i = 0; i < num_parsed_tasks; ++i) {
         int task_idx = search_task_name(tasknum, parsed_names[i]);
         if (task_idx == -1) {
@@ -714,15 +716,16 @@ int cmd_wrq(char *args) {
         ptr_t entry_point = load_task_img(tasks[task_idx].name, tasknum, next_task_addr);
 
         // Initialize the PCB
-        new_pcb->kernel_sp = allocKernelPage(KERNEL_STACK_PAGES) + KERNEL_STACK_PAGES * PAGE_SIZE;
-        new_pcb->user_sp = allocUserPage(USER_STACK_PAGES) + USER_STACK_PAGES * PAGE_SIZE;
+        new_pcb->kernel_sp = new_pcb->kernel_stack_base + KERNEL_STACK_PAGES * PAGE_SIZE;
+        new_pcb->user_sp = new_pcb->user_stack_base + USER_STACK_PAGES * PAGE_SIZE;
         new_pcb->pid = process_id++;
+        new_pcb->task_name = tasks[task_idx].name;
         new_pcb->status = TASK_READY;
         new_pcb->cursor_x = 0;
         new_pcb->cursor_y = i; // Give each task its own line
 
         // Initialize the fake context on the stack
-        init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, new_pcb);
+        init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, 0, NULL, new_pcb);
 
         // Add the initialized PCB to the ready queue
         list_add_tail(&new_pcb->list, &ready_queue);
@@ -788,7 +791,8 @@ int cmd_twrq(char *args) {
 
     // --- Initialize PCBs and add them to the ready_queue ---
     list_init(&ready_queue); // the list initialized in main.c shall be invalidated
-    ptr_t next_task_addr = TASK_MEM_BASE;
+    next_task_addr = TASK_MEM_BASE;
+    memcpy((uint8_t *)&pcb[0], (uint8_t *)&pid0_pcb, sizeof(pcb_t));
     for (int i = 0; i < num_parsed_tasks; ++i) {
         int task_idx = search_task_name(tasknum, parsed_names[i]);
         if (task_idx == -1) {
@@ -805,9 +809,10 @@ int cmd_twrq(char *args) {
         ptr_t entry_point = load_task_img(tasks[task_idx].name, tasknum, next_task_addr);
 
         // Initialize the PCB
-        new_pcb->kernel_sp = allocKernelPage(KERNEL_STACK_PAGES) + KERNEL_STACK_PAGES * PAGE_SIZE;
-        new_pcb->user_sp = allocUserPage(USER_STACK_PAGES) + USER_STACK_PAGES * PAGE_SIZE;
+        new_pcb->kernel_sp = new_pcb->kernel_stack_base + KERNEL_STACK_PAGES * PAGE_SIZE;
+        new_pcb->user_sp = new_pcb->user_stack_base + USER_STACK_PAGES * PAGE_SIZE;
         new_pcb->pid = process_id++;
+        new_pcb->task_name = tasks[task_idx].name;
         new_pcb->status = TASK_READY;
         new_pcb->remaining_workload = 1; // An initial value, avoid the first task to starve the CPU resources
         new_pcb->cursor_x = 0;
@@ -815,7 +820,7 @@ int cmd_twrq(char *args) {
         new_pcb->lap_count = 0;
 
         // Initialize the fake context on the stack
-        init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, new_pcb);
+        init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, 0, NULL, new_pcb);
 
         // Add the initialized PCB to the ready queue
         list_add_tail(&new_pcb->list, &ready_queue);
@@ -840,6 +845,8 @@ int cmd_twrq(char *args) {
 
     // Enable global interrupt here
     enable_interrupt();
+
+    unlock_kernel();
 
     // --- Interrupt driven idle loop ---
     while (1) {

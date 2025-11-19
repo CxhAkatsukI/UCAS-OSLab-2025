@@ -1,19 +1,40 @@
 #include "os/kernel.h"
+#include "os/smp.h"
+#include "os/string.h"
+#include "type.h"
 #include <os/list.h>
 #include <os/lock.h>
 #include <os/sched.h>
+#include <os/smp.h>
 #include <os/time.h>
 #include <os/mm.h>
+#include <cmd.h>
 #include <screen.h>
 #include <printk.h>
 #include <assert.h>
 
 pcb_t pcb[NUM_MAX_TASK];
+
+// Default PCB stacks
 const ptr_t pid0_stack = INIT_KERNEL_STACK + PAGE_SIZE;
+const ptr_t s_pid0_stack = S_INIT_KERNEL_STACK + PAGE_SIZE;
+
+// Default PCB, primary core
 pcb_t pid0_pcb = {
     .pid = 0,
     .kernel_sp = (ptr_t)pid0_stack,
-    .user_sp = (ptr_t)pid0_stack
+    .user_sp = (ptr_t)pid0_stack,
+    .task_name = "Windows",
+    .status = TASK_BLOCKED
+};
+
+// Default PCB, secondary core
+pcb_t s_pid0_pcb = {
+    .pid = 0,
+    .kernel_sp = (ptr_t)s_pid0_stack,
+    .user_sp = (ptr_t)s_pid0_stack,
+    .task_name = "MS-DOS",
+    .status = TASK_BLOCKED
 };
 
 LIST_HEAD(ready_queue);
@@ -24,6 +45,10 @@ pid_t process_id = 1;
 
 void do_scheduler(void)
 {
+    // lock_kernel();
+    // Use macro to set current_running pointer
+    pcb_t *current_running = CURRENT_RUNNING;
+
     // TODO: [p2-task3] Check sleep queue to wake up PCBs
     check_sleeping();
 
@@ -140,20 +165,27 @@ void do_scheduler(void)
     }
 #endif
 
-    current_running = next_running;
-    current_running->status = TASK_RUNNING;
+    // current_running = next_running;
+    // current_running->status = TASK_RUNNING;
+    // NOTE: per-core pointer shall be updated properly
+    SET_CURRENT_RUNNING(next_running);
+    CURRENT_RUNNING->status = TASK_RUNNING;
 
     // Update prev_running's last run time
     prev_running->last_run_time = get_ticks();
 
     // [p2-task1] switch_to current_running
-    switch_to(prev_running, current_running);
+    switch_to(prev_running, CURRENT_RUNNING);
+    // unlock_kernel();
 }
 
 void do_sleep(uint32_t sleep_time)
 {
     // TODO: [p2-task3] sleep(seconds)
     // NOTE: you can assume: 1 second = 1 `timebase` ticks
+
+    // Get current_running from macro
+    pcb_t *current_running = CURRENT_RUNNING;
 
     // 1. block the current_running
     current_running->status = TASK_BLOCKED;
@@ -194,6 +226,9 @@ void do_unblock(list_node_t *pcb_node)
 
 void do_set_sche_workload(int workload)
 {
+    // Get current_running from macro
+    pcb_t *current_running = CURRENT_RUNNING;
+
     // New lap detection
     if (workload > current_running->remaining_workload + 60) {
         current_running->lap_count++;
@@ -268,4 +303,265 @@ pcb_t *find_terminating_tasks(int min_lap_count)
     }
 
     return NULL;
+}
+
+static const char *get_status_string(task_status_t status)
+{
+    switch (status) {
+        case TASK_BLOCKED: return "BLOCKED";
+        case TASK_RUNNING: return "RUNNING";
+        case TASK_READY: return "READY  ";
+        case TASK_EXITED: return "EXITED ";
+        case TASK_UNUSED: return "UNUSED ";
+        default: return "UNKNOWN";
+    }
+}
+
+void do_process_show()
+{
+    bios_putstr(ANSI_FMT("[PROCESS TABLE]\n\r", ANSI_FG_GREEN));
+    bios_putstr(ANSI_FMT("PID   STATUS    KERNEL_SP        USER_SP        NAME\n\r", ANSI_FG_YELLOW));
+    bios_putstr(ANSI_FG_CYAN);
+
+    // Get current_running from macro
+    pcb_t *current_running = CURRENT_RUNNING;
+
+    // move cursor downwards
+    screen_move_cursor(current_running->cursor_x, current_running->cursor_y + 2);
+
+    // Loop through all PCBs that have been created
+    for (int i = 0; i < process_id; i++) {
+        // Only print tasks that haven't exited
+        if (pcb[i].status != TASK_EXITED && pcb[i].status != TASK_UNUSED) {
+            printk("%d     %s   0x%lx       0x%lx     %s\n",
+                   pcb[i].pid,
+                   get_status_string(pcb[i].status),
+                   pcb[i].kernel_sp,
+                   pcb[i].user_sp,
+                   pcb[i].task_name);
+        }
+    }
+    printk("\n");
+    bios_putstr(ANSI_NONE);
+}
+
+pid_t do_exec(char *name, int argc, char *argv[])
+{
+
+    // Get current_running from macro
+    pcb_t *current_running = CURRENT_RUNNING;
+
+    int task_idx = search_task_name(tasknum, name);
+    if (task_idx == -1) {
+        bios_putstr(ANSI_FMT("ERROR: Invalid task name in arguments: ", ANSI_BG_RED));
+        bios_putstr(ANSI_BG_RED);
+        bios_putstr(name);
+        bios_putstr(ANSI_FMT("\n\r", ANSI_NONE));
+        // move cursor downwards
+        screen_move_cursor(current_running->cursor_x, current_running->cursor_y + 1);
+        return 0; // Abort
+    }
+
+    // Get a free PCB
+    pcb_t *new_pcb = NULL;
+    if (process_id < NUM_MAX_TASK) {
+        new_pcb = &pcb[process_id];
+    } else {
+        int i;
+        for (i = 0; i < NUM_MAX_TASK; i++) {
+            if (pcb[i].status == TASK_UNUSED || pcb[i].status == TASK_EXITED) {
+                new_pcb = &pcb[i];
+                break;
+            }
+        }
+        if (i >= NUM_MAX_TASK)
+            new_pcb = &pcb[NUM_MAX_TASK - 1];
+    }
+
+    // Load the task into memory
+    ptr_t entry_point = load_task_img(tasks[task_idx].name, tasknum, next_task_addr);
+
+    // Initialize the PCB
+    list_init(&new_pcb->wait_list);
+    new_pcb->kernel_sp = new_pcb->kernel_stack_base + KERNEL_STACK_PAGES * PAGE_SIZE; // allocation handled in init_pcb()
+    new_pcb->pid = process_id++;
+    new_pcb->task_name = tasks[task_idx].name;
+    new_pcb->status = TASK_READY;
+    new_pcb->remaining_workload = 1; // An initial value, avoid the first task to starve the CPU resources
+    new_pcb->cursor_x = 0;
+    new_pcb->cursor_y = process_id; // Give each task its own line
+    new_pcb->lap_count = 0;
+
+    // Tackle user_sp, copying actual string onto user stack
+    ptr_t user_stack_top = new_pcb->user_stack_base + USER_STACK_PAGES * PAGE_SIZE;
+
+    int total_len = 0;
+    for (int i = 0; i < argc; ++i) {
+        total_len += strlen(argv[i]) + 1;
+    }
+
+    // Address for args string buffer and argv array
+    char *str_buf = (char *)user_stack_top - total_len;
+    char *current_str = str_buf;
+    char **new_argv = (char **)(current_str - (argc + 1) * sizeof(char *));
+
+    for (int i = 0; i < argc; ++i) {
+        strcpy(current_str, argv[i]);
+        new_argv[i] = current_str;
+        current_str += strlen(argv[i]) + 1;
+    }
+    new_argv[argc] = NULL;
+
+    // AAlign the final stack pointer to a 16-byte boundary
+    ptr_t final_user_stack = (ptr_t)new_argv & ~0xF;
+
+    // Set the new_pcb's user stack pointer
+    new_pcb->user_sp = final_user_stack;
+
+    // Initialize the fake context on the stack
+    init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, argc, new_argv, new_pcb);
+
+    // Add the initialized PCB to the ready queue
+    list_add_tail(&new_pcb->list, &ready_queue);
+
+    // Update the next available task address, page-aligned
+    next_task_addr += tasks[task_idx].byte_size;
+    next_task_addr = (next_task_addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+
+    // Update global process_id and return
+    return new_pcb->pid;
+}
+
+void do_exit(void)
+{
+
+    // Get current_running from macro
+    pcb_t *current_running = CURRENT_RUNNING;
+
+    // Mark the current process as exited
+    current_running->status = TASK_EXITED;
+
+    // Unblock any waiting parent
+    if (!list_is_empty(&current_running->wait_list)) {
+        pcb_t *parent = list_entry(current_running->wait_list.next, pcb_t, list);
+        do_unblock(&parent->list);
+    }
+
+    // reschedule to run another task
+    do_scheduler();
+}
+
+pid_t do_getpid()
+{
+    return CURRENT_RUNNING->pid;
+}
+
+int do_kill(pid_t pid)
+{
+    // Find the PCB in the pcb array
+    pcb_t *target_pcb = NULL;
+    for (int i = 0; i < NUM_MAX_TASK; i++) {
+        if (pcb[i].pid == pid && pcb[i].status != TASK_UNUSED && pcb[i].status != TASK_EXITED) {
+            target_pcb = &pcb[i];
+            break;
+        }
+    }
+
+    // Return an error if process was not found
+    if (target_pcb == NULL){
+        printk("ERROR: Process with PID %d not found or already exited.\n", pid);
+        return 0; // Failure
+    }
+
+    // Release all locks held by the target process
+    // We must create a temporary copy of the locks to release, because
+    // do_mutex_lock_release will modify the target_pcb->held_locks array.
+    extern mutex_lock_t mlocks[LOCK_NUM];
+    int locks_to_release[LOCK_NUM];
+    int num_locks = target_pcb->num_held_locks;
+    memcpy((uint8_t *)locks_to_release, (uint8_t *)target_pcb->held_locks, num_locks * sizeof(int));
+
+    for (int i = 0; i < num_locks; i++) {
+        // We need a special, more direct release function here because the
+        // target process is not the 'current_running' one.
+        int lock_idx = locks_to_release[i];
+        mutex_lock_t *lock = &mlocks[lock_idx];
+
+        spin_lock_acquire(&lock->lock);
+        if (!list_is_empty(&lock->block_queue)) {
+            list_node_t *node = lock->block_queue.next;
+            pcb_t *waking_pcb = list_entry(node, pcb_t, list);
+            do_unblock(&waking_pcb->list);
+        }
+
+        lock->status = UNLOCKED;
+        spin_lock_release(&lock->lock);
+    }
+    target_pcb->num_held_locks = 0;
+
+
+    // Change the process's status to TASK_EXITED
+    target_pcb->status = TASK_EXITED;
+
+    // If the task is blocked, remove it from any wait queue
+    if (target_pcb->list.next != NULL && target_pcb->list.prev != NULL) {
+        list_del(&target_pcb->list);
+    }
+
+    // Unblock any parent process waiting on this PID in waitpid.
+    if (!list_is_empty(&target_pcb->wait_list)) {
+        pcb_t *parent = list_entry(target_pcb->wait_list.next, pcb_t, list);
+        do_unblock(&parent->list);
+    }
+
+    printk("[TASK] Process (pid=%d) has been killed.\n", pid);
+
+    return 1; // Success
+}
+
+int do_waitpid(pid_t pid)
+{
+
+    // Get current_running from macro
+    pcb_t *current_running = CURRENT_RUNNING;
+
+    // Find the required child process
+    pcb_t *child_pcb = NULL;
+    for (int i = 0; i < process_id; i++) {
+        if (pcb[i].pid == pid) {
+            child_pcb = &pcb[i];
+            break;
+        }
+    }
+
+    // Return error if child process doesn't exist
+    if (child_pcb == NULL) {
+        bios_putstr(ANSI_FMT("ERROR: waitpid failed, required pid not found\n\r", ANSI_BG_RED));
+        // move cursor downwards
+        screen_move_cursor(current_running->cursor_x, current_running->cursor_y + 1);
+        bios_putstr(ANSI_FG_RED);
+        printk("Target PID: %d\n", pid);
+        bios_putstr(ANSI_NONE);
+        return 0; // Failure
+    }
+
+    // Check child's status
+    if (child_pcb->status == TASK_EXITED) {
+        // Reap the zombie process
+        // For now, we'll just clear the PCB to make it reusable
+        child_pcb->pid = 0;
+        child_pcb->status = TASK_EXITED; // Set to exited to indicate it's free
+        list_init(&child_pcb->wait_list);
+        // In a real OS, we would also free memory pages here.
+    } else {
+        // move cursor downwards
+        screen_move_cursor(0, current_running->cursor_y + 1);
+        // Child is still running, block the parent
+        bios_putstr(ANSI_FG_YELLOW);
+        printk("[INFO] Parent (pid = %d) is waiting for child (pid=%d).\n", current_running->pid, pid);
+        bios_putstr(ANSI_NONE);
+        do_block(&current_running->list, &child_pcb->wait_list);
+    }
+
+    return pid;
 }

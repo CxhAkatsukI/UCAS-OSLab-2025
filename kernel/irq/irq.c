@@ -1,5 +1,7 @@
 #include "sys/syscall.h"
 #include <csr.h>
+#include <asm/unistd.h>
+#include <os/debug.h>
 #include <os/irq.h>
 #include <os/time.h>
 #include <os/sched.h>
@@ -18,8 +20,13 @@ void interrupt_helper(regs_context_t *regs, uint64_t stval, uint64_t scause)
     // call corresponding handler by the value of `scause`
     uint64_t exc_code = scause & (~SCAUSE_IRQ_FLAG);
     if ((scause & SCAUSE_IRQ_FLAG) > 0) {
+        klog("IRQ received, code: %d\n", exc_code); // Log the IRQ code
         ((handler_t)irq_table[exc_code])(regs, stval, scause);
     } else {
+        int syscall_num = regs->regs[17];
+        int disable_print = (syscall_num == SYSCALL_READCH);
+        if (!disable_print)
+            klog("Exception received, code: %d\n", exc_code); // Log the Exception code
         ((handler_t)exc_table[exc_code])(regs, stval, scause);
     }
 }

@@ -233,6 +233,10 @@ ENTRY(switch_to)
 ENDPROC(switch_to)
 
 ENTRY(ret_from_exception)
+
+  // Unlock ther kernel first
+  call unlock_kernel
+
   /* TODO: [p2-task3] restore context via provided macro and return to sepc */
   /* HINT: remember to check your sp, does it point to the right address? */
   RESTORE_CONTEXT
@@ -254,6 +258,9 @@ ENTRY(exception_handler_entry)
 
   /* TODO: [p2-task3] save context via the provided macro */
   SAVE_CONTEXT
+
+  // Call lock_kernel to save kernel resources
+  call lock_kernel
 
   /* TODO: [p2-task3] load ret_from_exception into $ra so that we can return to
    * ret_from_exception when interrupt_help complete.
@@ -303,3 +310,11 @@ dbg_switch_msg:
 
 
 ENDPROC(exception_handler_entry)
+
+ENTRY(fake_switch_to_context)
+
+  call unlock_kernel
+  la ra, ret_from_exception
+  jr ra
+
+ENDPROC(fake_switch_to_context)

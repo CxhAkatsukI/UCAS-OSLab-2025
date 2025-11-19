@@ -29,7 +29,10 @@
 #ifndef INCLUDE_SCHEDULER_H_
 #define INCLUDE_SCHEDULER_H_
 
+#include "os/loader.h"
+#include "os/smp.h"
 #include <type.h>
+#include <os/lock.h>
 #include <os/list.h>
 
 #define NUM_MAX_TASK 16
@@ -70,6 +73,7 @@ typedef struct switchto_context
 } switchto_context_t;
 
 typedef enum {
+    TASK_UNUSED,
     TASK_BLOCKED,
     TASK_RUNNING,
     TASK_READY,
@@ -93,6 +97,9 @@ typedef struct pcb
     /* process id */
     pid_t pid;
 
+    /* process name */
+    char *task_name;
+
     /* BLOCK | READY | RUNNING */
     task_status_t status;
 
@@ -102,6 +109,10 @@ typedef struct pcb
 
     /* time(seconds) to wake up sleeping PCB */
     uint64_t wakeup_time;
+
+    /* lock management, for do_kill() to release locks */
+    int held_locks[LOCK_NUM];
+    int num_held_locks;
 
     // --- User Program Utilized Fields ---
 
@@ -123,14 +134,20 @@ extern list_head ready_queue;
 extern list_head sleep_queue;
 
 /* current running task PCB */
-register pcb_t * current_running asm("tp");
+// register pcb_t * current_running asm("tp");
 extern pid_t process_id;
 
 extern pcb_t pcb[NUM_MAX_TASK];
+
+// Default PCBs and their stacks
+// NOTE: ONLY secondary core will reach here. Primary core's command loop never returns
 extern pcb_t pid0_pcb;
+extern pcb_t s_pid0_pcb;
 extern const ptr_t pid0_stack;
+extern const ptr_t s_pid0_stack;
 
 extern void switch_to(pcb_t *prev, pcb_t *next);
+extern void fake_switch_to_context();
 void do_scheduler(void);
 void do_sleep(uint32_t);
 
@@ -140,8 +157,12 @@ void do_unblock(list_node_t *);
 uint64_t calculate_timeslice(pcb_t *task_to_run, int min_lap_count);
 pcb_t *find_terminating_tasks(int min_lap_count);
 
+// helper function for do_exec
+int search_task_name(int tasknum, char *name);
+pid_t do_exec(char *name, int argc, char **argv);
+
 void init_pcb_stack(
-    ptr_t kernel_stack, ptr_t user_stack, ptr_t entry_point,
+    ptr_t kernel_stack, ptr_t user_stack, ptr_t entry_point, int argc, char *argv[],
     pcb_t *pcb);
 
 /************************************************************/
@@ -156,6 +177,31 @@ extern int do_kill(pid_t pid);
 extern int do_waitpid(pid_t pid);
 extern void do_process_show();
 extern pid_t do_getpid();
+
+// Multi-core related data structures
+typedef struct cpu {
+    pcb_t *current_running;
+    // TODO: Add other per-core data here
+} cpu_t;
+
+// Global array for CPUs
+extern cpu_t cpu_table[NR_CPUS];
+
+#define CURRENT_RUNNING \
+    ({ \
+        cpu_t *cpu; \
+        asm volatile("mv %0, tp" : "=r"(cpu)); \
+        cpu->current_running; \
+    })
+
+// This macro SETS the current running PCB for the current core
+#define SET_CURRENT_RUNNING(pcb_ptr) \
+    ({ \
+        cpu_t *cpu; \
+        asm volatile("mv %0, tp" : "=r"(cpu)); \
+        cpu->current_running = pcb_ptr; \
+    })
+
 /************************************************************/
 
 #endif

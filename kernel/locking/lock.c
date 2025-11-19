@@ -1,7 +1,8 @@
+#include <atomic.h>
+#include <os/list.h>
 #include <os/lock.h>
 #include <os/sched.h>
-#include <os/list.h>
-#include <atomic.h>
+#include <os/smp.h>
 
 /* Define mutex locks array and its spin lock */
 mutex_lock_t mlocks[LOCK_NUM];
@@ -91,17 +92,32 @@ int do_mutex_lock_init(int key)
  */
 void do_mutex_lock_acquire(int mlock_idx)
 {
+
+    // Get current_running from macro
+    pcb_t *current_running = CURRENT_RUNNING;
+
     /* TODO: [p2-task2] acquire mutex lock */
     mutex_lock_t *lock = &mlocks[mlock_idx];
 
     while (1) {
         // Acquire the internal spinlock to check the mutex status safely
+        unlock_kernel();
         spin_lock_acquire(&lock->lock);
 
         if (lock->status == UNLOCKED) {
             // Lock is free, so we take it
             lock->status = LOCKED;
+
+            // Add to held_locks array
+            if (current_running->num_held_locks < LOCK_NUM) {
+                current_running->held_locks[current_running->num_held_locks++] = mlock_idx;
+            } else {
+                // TODO: handle error when process is trying to hold too many locks
+                ;
+            }
+
             spin_lock_release(&lock->lock);
+            lock_kernel();
             break; // Exit the loop, we have the lock
         } else {
             // Lock is busy, so we must block
@@ -110,9 +126,27 @@ void do_mutex_lock_acquire(int mlock_idx)
 
             // Release the spinlock *before* sleeping
             spin_lock_release(&lock->lock);
+            lock_kernel();
             do_scheduler();
 
             // When we wake up, loop back to try acquiring the lock again
+        }
+    }
+}
+
+/**
+ * @brief Helper function to remove a lock from a PCB's held_locks array.
+ */
+static void release_lock_for_pcb(pcb_t *pcb, int mlock_idx)
+{
+    for (int i = 0; i < pcb->num_held_locks; i++) {
+        if (pcb->held_locks[i] == mlock_idx) {
+            // Found the lock, remove it by shifting the rest of the array
+            for (int j = i; j < pcb->num_held_locks - 1; j++) {
+                pcb->held_locks[j] = pcb->held_locks[j + 1];
+            }
+            pcb->num_held_locks--;
+            return; // Exit after removing the lock
         }
     }
 }
@@ -124,22 +158,49 @@ void do_mutex_lock_acquire(int mlock_idx)
  */
 void do_mutex_lock_release(int mlock_idx)
 {
-    /* TODO: [p2-task2] release mutex lock */
+    // Get current_running from macro
+    pcb_t *current_running = CURRENT_RUNNING;
+
     mutex_lock_t *lock = &mlocks[mlock_idx];
-    // protect muttex's metadata from racing condition
+
+    // Remove the lock from the current process's list FIRST.
+    release_lock_for_pcb(current_running, mlock_idx);
+
     spin_lock_acquire(&lock->lock);
+
     if (!list_is_empty(&lock->block_queue)) {
-        // Other tasks are waiting for the lock. Get the first one.
+        // Other tasks are waiting. Unblock the first one, effectively passing the lock.
         list_node_t *first_node = lock->block_queue.next;
         pcb_t *first_waiting_pcb = list_entry(first_node, pcb_t, list);
-
-        // Unblock it, transferring lock ownership.
         do_unblock(&first_waiting_pcb->list);
     }
 
-    // No tasks are waiting, release the lock
+    // No tasks are waiting, so just mark the lock as free.
     lock->status = UNLOCKED;
 
-    // release spin lock before return
     spin_lock_release(&lock->lock);
+}
+
+/**
+ * @brief Destroy the mutex lock at the given index
+ *
+ * @param mlock_idx The index of the mutex lock to release
+ */
+void do_mutex_lock_destroy(int mlock_idx)
+{
+    mutex_lock_t *lock = &mlocks[mlock_idx];
+
+    spin_lock_acquire(&lock->lock);
+
+    if (lock->status == UNLOCKED && list_is_empty(&lock->block_queue)) {
+        lock->key = -1;
+        list_init(&lock->block_queue);
+        lock->status = UNLOCKED;
+        spin_lock_init(&lock->lock);
+        return;
+    } else {
+        // Unsuccessful condition
+        spin_lock_release(&lock->lock);
+        return;
+    }
 }
