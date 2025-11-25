@@ -1,2089 +1,1167 @@
-## Understanding the big picture
+# Project 3 Task 1: Shell and Process Management Implementation Document
 
-Here is the blueprint of the execution flow after the system boots:
+## 1. Overview
+The goal of Task 1 is to transform the kernel from a static task runner into an interactive system. This involves implementing a **Shell** to accept user commands and a set of **Process Management System Calls** (`exec`, `exit`, `kill`, `waitpid`, `ps`, `clear`) to manage the lifecycle of tasks.
 
-1.  **`main()` Starts**: After the assembly boot code finishes, it jumps to the `main()` function in `init/main.c`. At this point, there are no processes, just a single thread of execution running in kernel mode. We can think of this as **"Process 0"** or the idle process, which is represented by `pid0_pcb`.
+## 2. Implementation Steps
 
-2.  **`init_jmptab()`**: This function sets up a simple "jump table". Since we don't have real system calls yet, user programs will use this table to call kernel functions. For Task 1, the most important one is `jmptab[YIELD] = (long (*)())do_scheduler;`. This means when a user task calls `yield()`, it will directly call your `do_scheduler` function.
+### Step 1: Screen Driver Enhancements (`drivers/screen.c`)
+Before the shell can function properly, the screen driver must support basic editing features, specifically the **Backspace** key.
 
-3.  **`init_task_info()`**: This reads the application metadata (like task names, e.g., `"print1"`, `"fly"`) that the build tools burned into a specific memory location. It populates the `tasks` array.
+**Implementation Logic:**
+In `screen_write_ch`, we intercept the backspace character (`\b` or `0x7F`). If detected, we move the cursor back one position and overwrite the character at that position with a space.
 
-4.  **`init_pcb()`**: This is **your first major job in Task 1**. This function's purpose is to:
-    *   Create and initialize a Process Control Block (`pcb_t`) for each task found by `init_task_info`.
-    *   Prepare each process to be run for the first time.
-    *   Set the global `current_running` pointer to `pid0_pcb`, because the kernel's idle process is what's running initially.
-
-5.  **Other Inits**: `init_locks()`, `init_exception()`, etc., are called to set up other kernel subsystems.
-
-Of course. Here is that phase of the execution flow converted into Markdown.
-
-**Phase 2: The First Context Switch**
-
-1.  The `while(1)` loop in `main()` calls `do_scheduler()`.
-
-2.  **Inside `do_scheduler()`:**
-    *   `current_running` is currently `pid0_pcb`.
-    *   Your code should pick the first task from the `ready_queue` (e.g., the PCB for "print1").
-    *   Then, you'll call `switch_to(&pid0_pcb, &pcb_for_print1)`.
-
-3.  **Inside `switch_to()`:**
-    *   It saves the context of the current process (`pid0_pcb`). This isn't very important right now, but it's part of the process.
-    *   It then restores the context of the next process ("print1").
-    *   > This is the magic moment. Because of the "fake context" you created during `init_pcb`, the `ra` (return address) register will be loaded with the entry point of the "print1" task.
-    *   When `switch_to` executes its final `ret` instruction, it doesn't return to `do_scheduler`. Instead, it "returns" to the beginning of the "print1" code, and that task starts executing
-
-## Task 1
-### Implementing `init_pcb()`
-
-This function handles `pcb` initializing. It loops through all the available tasks and initializes the `pcb` array:
-
-```C
-static void init_pcb(void)
+```c
+void screen_write_ch(char ch)
 {
-    /* TODO: [p2-task1] load needed tasks and init their corresponding PCB */
-    ptr_t next_task_addr = TASK_MEM_BASE;
-    tasknum = *(short *)TASK_NUM_LOC; // Ensure tasknum is loaded
+    pcb_t *current_running = CURRENT_RUNNING;
 
-    for (int i = 0; i < tasknum; i++) {
-        // Load the task into memory at the next available address
-        ptr_t entry_point = load_task_img(tasks[i].name, tasknum, next_task_addr);
-        
-        // Get a free PCB
-        pcb_t *new_pcb = &pcb[process_id];
-
-        // Initialize the PCB
-        new_pcb->kernel_sp = allocKernelPage(1);
-        new_pcb->user_sp = allocUserPage(1);
-        new_pcb->pid = process_id++;
-        new_pcb->status = TASK_READY;
-        new_pcb->cursor_x = 0;
-        new_pcb->cursor_y = i; // Give each task its own line to start
-
-        // Initialize the stack for the first run
-        init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, new_pcb);
-
-        // Add the PCB to the ready queue
-        list_add_tail(&new_pcb->list, &ready_queue);
-
-        // Update the next available task address, page-aligned
-        next_task_addr += tasks[i].byte_size;
-        next_task_addr = (next_task_addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    if (ch == '\n') {
+        // ... existing newline logic ...
     }
-
-    /* TODO: [p2-task1] remember to initialize 'current_running' */
-    current_running = &pid0_pcb;
+    else if (ch == '\b' || ch == '\177') {
+        // [Task 1] Backspace support
+        if (current_running->cursor_x > 0) {
+            current_running->cursor_x--;
+            // Overwrite visual buffer with space
+            new_screen[SCREEN_LOC(current_running->cursor_x, current_running->cursor_y)] = ' ';
+        }
+    }
+    else {
+        // ... existing character write logic ...
+    }
 }
 ```
 
-### Add command line support for task 2.1
+---
 
-We can add a command line handler to customize `ready_queue` for task 2.1. This function first initialize `ready_queue` base on the user's input, then `do_scheduler` will take over control to complete the scheduling process. The handler is as follows:
+### Step 2: The Shell (`test/shell.c`)
+The shell is a user-space process (PID 1) that reads input from the UART, parses it, and invokes system calls.
 
-```C
-int cmd_demo_2_1(char *args) {
-    // Check for empty arguments
-    if (args == NULL || *args == '\0') {
-        bios_putstr(ANSI_FMT("ERROR: Usage: demo_2_1 <task_name1> <task_name2> ...", ANSI_BG_RED));
-        bios_putstr(ANSI_FMT("\n\r", ANSI_NONE)); // Newline and reset color.
-        return 0;
-    }
+#### 2.1. Input Reading (`read_line`)
+We implement a function to read a full line of input. It echoes characters back to the screen and handles backspaces visually.
 
-    // --- Tokenize the input arguments into individual task names ---
-    char parsed_names[MAX_BATCH_TASKS][MAX_NAME_LEN];
-    int num_parsed_tasks = tokenize_string(args, parsed_names, MAX_BATCH_TASKS);
+```c
+static void read_line(char *buffer, int max_len) {
+    int ptr = 0;
+    memset(buffer, 0, max_len);
 
-    if (num_parsed_tasks <= 0) {
-        bios_putstr(ANSI_FMT("ERROR: No tasks provided for demo.", ANSI_BG_RED));
-        bios_putstr(ANSI_FMT("\n\r", ANSI_NONE));
-        return 0;
-    }
-
-    // --- Initialize PCBs and add them to the ready_queue ---
-    list_init(&ready_queue); // the list initialized in main.c shall be invalidated
-    ptr_t next_task_addr = TASK_MEM_BASE;
-    for (int i = 0; i < num_parsed_tasks; ++i) {
-        int task_idx = search_task_name(tasknum, parsed_names[i]);
-        if (task_idx == -1) {
-            bios_putstr(ANSI_FMT("ERROR: Invalid task name in arguments: ", ANSI_BG_RED));
-            bios_putstr(parsed_names[i]);
-            bios_putstr(ANSI_FMT("\n\r", ANSI_NONE));
-            return 0; // Abort
-        }
-
-        // Get a free PCB
-        pcb_t *new_pcb = &pcb[process_id];
-
-        // Load the task into memory
-        ptr_t entry_point = load_task_img(tasks[task_idx].name, tasknum, next_task_addr);
-
-        // Initialize the PCB
-        new_pcb->kernel_sp = allocKernelPage(1);
-        new_pcb->user_sp = allocUserPage(1);
-        new_pcb->pid = process_id++;
-        new_pcb->status = TASK_READY;
-        new_pcb->cursor_x = 0;
-        new_pcb->cursor_y = i; // Give each task its own line
-
-        // Initialize the fake context on the stack
-        init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, new_pcb);
-
-        // Add the initialized PCB to the ready queue
-        list_add_tail(&new_pcb->list, &ready_queue);
-
-        // Update the next available task address, page-aligned
-        next_task_addr += tasks[task_idx].byte_size;
-        next_task_addr = (next_task_addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-    }
-    
-    bios_putstr(ANSI_FMT("Info: Starting scheduler...\n\r", ANSI_FG_GREEN));
-
-    // Enough newlines to clear the screen
-    // (don't know how to utilize screen_clear and screen_reflush API)
-    bios_putstr("\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r");
-    bios_putstr("\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r");
-    bios_putstr("\n\r\n\r\n\r");
-    screen_clear();
-    screen_reflush();
-
-    // --- do_scheduler takes over control ---
     while (1) {
-        do_scheduler();
-    }
+        char input_char = sys_getchar(); // Syscall to read UART
 
-    return 0;
-}
-```
+        if (input_char == 0 || input_char == 0xFF) continue;
 
-### Modifying `load_task_img`
-
-Since in this task, we are going to load all tasks at one time, so we should enable `load_task_img` to load tasks into differernt memory location, as follows:
-
-```C
-uint64_t load_task_img(char *name, int tasknum, ptr_t dest_addr)
-{
-    /**
-     * TODO:
-     * 1. [p1-task3] load task from image via task id, and return its entrypoint
-     * 2. [p1-task4] load task via task name, thus the arg should be 'char *taskname'
-     */
-
-    // read content from sd card and copy the content to memory base on offset
-    int task_idx = search_task_name(tasknum, name);
-    task_info_t *task = &tasks[task_idx];
-    sd_read((uintptr_t)temp_load_buffer, task->size + 1, task->start_sector);
-    uint32_t offset_in_buffer = task->byte_offset % SECTOR_SIZE;
-    memcpy((void *)dest_addr, (void *)temp_load_buffer + offset_in_buffer, task->byte_size);
-
-    // Conditional debug output block
-    if (DEBUG == 1) {
-        // Set the text color to green
-        bios_putstr(ANSI_FG_GREEN);
-
-        bios_putstr("DEBUG: Loaded '");
-        bios_putstr(name);
-        bios_putstr("'. First bytes in memory:\n\r  "); // Indent the hex output
-
-        // Determine how many bytes to print (up to a max of 16 for a brief summary)
-        int bytes_to_print = (task->byte_size > 16) ? 16 : task->byte_size;
-        uint8_t *mem_ptr = (uint8_t *)dest_addr;
-
-        // Loop through the bytes and print each one in hex
-        for (int i = 0; i < bytes_to_print; i++) {
-            bios_puthex_byte(mem_ptr[i]);
-            bios_putchar(' ');
-        }
-
-        // as it would be redundant for smaller files.
-        if (task->byte_size > 16) {
-            bios_putstr("\n\r  Last bytes in memory:\n\r  ");
-
-            // Point to the start of the last 16 bytes
-            uint8_t *last_mem_ptr = (uint8_t *)dest_addr + task->byte_size - 16;
-
-            // Loop through the last 16 bytes and print each one in hex
-            for (int i = 0; i < 16; i++) {
-                bios_puthex_byte(last_mem_ptr[i]);
-                bios_putchar(' ');
+        if (input_char == '\r' || input_char == '\n') {
+            printf("\n");
+            buffer[ptr] = '\0';
+            return;
+        } 
+        else if (input_char == '\b' || input_char == 127) { 
+            // Handle backspace in buffer and on screen
+            if (ptr > 0) {
+                ptr--;
+                printf("\b \b"); 
             }
+        } 
+        else if (ptr < max_len - 1) {
+            buffer[ptr++] = input_char;
+            printf("%c", input_char); // Echo
         }
-
-        bios_putstr("\n\r");
-
-        // IMPORTANT: Reset the color back to default
-        bios_putstr(ANSI_NONE);
     }
-
-    // FENCE.I ensures that the instruction fetch pipeline sees the
-    // recently written data (our new code).
-    asm volatile ("fence.i" ::: "memory");
-
-    return dest_addr;
 }
 ```
 
-### Implementing `init_pcb_stack`
+#### 2.2. Command Parsing (`cmd_exec`)
+When the user types `exec <name> [args...]`, the shell must tokenize the string to separate the program name from its arguments.
 
-We should implement `init_pcb_stack` to create a "fake" `switch_to` context on the kernel stack of each new process. This ensures that when the scheduler switches to the task for the first time, it correctly "returns" to the task's entry point.
+```c
+void cmd_exec(char *args) {
+    char *argv[MAX_ARGS];
+    int argc = tokenize_string(args, argv, MAX_ARGS); // Splits string by spaces
 
-```C
-void init_pcb_stack(
-    ptr_t kernel_stack, ptr_t user_stack, ptr_t entry_point,
-    pcb_t *pcb)
+    // Handle background execution '&'
+    // ... (Logic to remove '&' from argv if present) ...
+
+    // Call the kernel
+    pid_t pid = sys_exec(argv[0], argc, argv);
+
+    if (pid != 0 && !background) {
+        sys_waitpid(pid); // Block shell until child finishes
+    }
+}
+```
+
+---
+
+### Step 3: Kernel Process Management (`kernel/sched/sched.c`)
+
+This is the core of Task 1. We replace the static task initialization with dynamic creation via system calls.
+
+#### 3.1. `do_exec`: Loading and Argument Passing
+This function loads a program from the image and sets up its stack. Crucially, for A/C-Core requirements, it copies arguments (`argv`) to the **new process's user stack**.
+
+**Implementation Logic:**
+1.  **Locate Task:** Use `search_task_name` to find the binary in the `tasks[]` array.
+2.  **Allocate PCB:** Find an `UNUSED` or `EXITED` PCB slot.
+3.  **Load Binary:** Copy instructions from SD card to memory (`load_task_img`).
+4.  **Setup Stack & Arguments:**
+    *   Calculate total size of all argument strings.
+    *   Allocate space at the top of the *new* user stack.
+    *   Copy strings and the pointer array (`argv`) into this space.
+    *   Align the stack pointer.
+
+Here is the code: 
+
+```c
+pid_t do_exec(char *name, int argc, char *argv[], uint64_t mask)
 {
-    /* TODO: [p2-task3] initialization of registers on kernel stack
-     * HINT: sp, ra, sepc, sstatus
-     * NOTE: To run the task in user mode, you should set corresponding bits
-     *     of sstatus(SPP, SPIE, etc.).
-     */
-    regs_context_t *pt_regs = (regs_context_t *)(kernel_stack - sizeof(regs_context_t));
+    // ... (Find task and allocate new_pcb) ...
 
-    /* TODO: [p2-task1] set sp to simulate just returning from switch_to
-     * NOTE: you should prepare a stack, and push some values to
-     * simulate a callee-saved context.
-     */
-    switchto_context_t *pt_switchto =
-        (switchto_context_t *)((ptr_t)pt_regs - sizeof(switchto_context_t));
+    // Copy arguments to new user stack
+    ptr_t user_stack_top = new_pcb->user_stack_base + USER_STACK_PAGES * PAGE_SIZE;
+    int total_len = 0;
+    for (int i = 0; i < argc; ++i) total_len += strlen(argv[i]) + 1;
+
+    char *str_buf = (char *)user_stack_top - total_len;
+    char **new_argv = (char **)(str_buf - (argc + 1) * sizeof(char *));
+
+    // Actual copy
+    for (int i = 0; i < argc; ++i) {
+        strcpy(str_buf, argv[i]);
+        new_argv[i] = str_buf;
+        str_buf += strlen(argv[i]) + 1;
+    }
+    new_argv[argc] = NULL;
+
+    // Align stack
+    new_pcb->user_sp = (ptr_t)new_argv & ~0xF;
+
+    // Initialize context: Pass argc (arg0) and new_argv (arg1) 
+    init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, argc, new_argv, new_pcb);
+
+    list_add_tail(&new_pcb->list, &ready_queue);
+    return new_pcb->pid;
+}
+```
+
+#### 3.2. `init_pcb_stack` Update
+We updated this function to place `argc` and `argv` into registers `a0` and `a1` of the trap frame. When the process starts (via `sret`), these registers will hold the arguments for `main`.
+
+```c
+void init_pcb_stack(..., int argc, char *argv[], ...)
+{
+    // ...
+    pt_regs->regs[10] = argc;        // a0
+    pt_regs->regs[11] = (reg_t)argv; // a1
+    // ...
+}
+```
+
+#### 3.3. `do_exit`: Termination
+When a process calls `exit()`, it must notify its parent.
+
+```c
+void do_exit(void)
+{
+    pcb_t *current_running = CURRENT_RUNNING;
+    current_running->status = TASK_EXITED;
+
+    // Wake up parent blocked in waitpid
+    if (!list_is_empty(&current_running->wait_list)) {
+        pcb_t *parent = list_entry(current_running->wait_list.next, pcb_t, list);
+        do_unblock(&parent->list);
+    }
+
+    do_scheduler(); // Yield CPU immediately
+}
+```
+
+#### 3.4. `do_waitpid`: Synchronization
+This allows the Shell (or any parent) to pause until a specific child finishes.
+
+```c
+int do_waitpid(pid_t pid)
+{
+    // Find child PCB by PID...
+    // ...
     
-    // Set the `ra` (return address) register in our fake context to the task's entry point.
-    pt_switchto->regs[0] = entry_point; // ra
-
-    // Set the `sp` (stack pointer) for the new task.
-    // The stack pointer should point to the base of our fake context.
-    pt_switchto->regs[1] = (reg_t)pt_switchto; // sp
-
-    // Update the PCB's kernel_sp to point to this fake context.
-    pcb->kernel_sp = (reg_t)pt_switchto;
-    pcb->user_sp = user_stack;
-}
-```
-
-> [!Note] About the Fake Context
-> Why do we need a fake context? When we want to switch from kernel to our user functions, the user function itself does not have a context (like the current content in the register). So we have to create a context for them, so that when the user application resumes this context, the effect is same as if the function had been called through a normal function call mechanism. So the `ra` in the context shall be set to the entry point of the user function.
-
-### Implementing the `do_scheduler` function
-
-This function inserts the next user application after the head of the `ready_queue`, and performs the `switch_to` function
-
-```C
-void do_scheduler(void)
-{
-    // TODO: [p2-task3] Check sleep queue to wake up PCBs
-
-    /************************************************************/
-    /* Do not touch this comment. Reserved for future projects. */
-    /************************************************************/
-
-    // [p2-task1] Modify the current_running pointer.
-    pcb_t *prev_running = current_running;
-    pcb_t *next_running;
-
-    if (prev_running->status == TASK_RUNNING) {
-        prev_running->status = TASK_READY;
-        list_add_tail(&prev_running->list, &ready_queue);
-    }
-
-    if (!list_is_empty(&ready_queue)) {
-        // Dequeue the next task from the ready queue
-        next_running = list_entry(ready_queue.next, pcb_t, list);
-        list_del(ready_queue.next);
+    if (child_pcb->status == TASK_EXITED) {
+        // Process already dead, clean up immediately
+        child_pcb->status = TASK_UNUSED; 
     } else {
-        // If the ready queue is empty, schedule the idle process
-        next_running = &pid0_pcb;
+        // Process running, block current process on child's wait_list
+        do_block(&CURRENT_RUNNING->list, &child_pcb->wait_list);
     }
-
-    current_running = next_running;
-    current_running->status = TASK_RUNNING;
-
-    // [p2-task1] switch_to current_running
-    switch_to(prev_running, current_running);
+    return pid;
 }
 ```
 
-### Creating List APIs
+#### 3.5. `do_kill`: Resource Cleanup
+Forcefully stopping a process requires releasing its held resources (locks) to prevent deadlocking the system.
 
-In the previous implementations, we have performed some list operations. We have to create these list APIs in `list.c` (newly created) and `list.h`, these APIs are as follows:
-
-**In `list.h`:**
-
-```C
-// Get the struct for this entry
-#define list_entry(ptr, type, member) \
-    ((type *)((char *)(ptr) - (unsigned long)(&((type *)0)->member)))
-
-void list_init(list_node_t *list);
-void list_add(list_node_t *new, list_node_t *head);
-void list_add_tail(list_node_t *new, list_node_t *head);
-void list_del(list_node_t *entry);
-
-static inline int list_is_empty(const list_head *head)
+```c
+int do_kill(pid_t pid)
 {
-    return head->next == head;
+    // Find target PCB...
+    // Release all locks held by this process
+    for (int i = 0; i < target_pcb->num_held_locks; i++) {
+        do_mutex_lock_release(target_pcb->held_locks[i]);
+    }
+    
+    target_pcb->status = TASK_EXITED;
+    // Remove from ready queue and wake up parents...
+    return 1;
 }
 ```
 
-**In `list.c`:**
+---
 
-```C
-#include <os/list.h>
+### Step 4: Startup Logic (`arch/riscv/crt0/crt0.S`)
+The startup code for user programs was modified to handle the arguments passed by the kernel.
 
-// initialize a list head
-void list_init(list_node_t *list)
+```asm
+ENTRY(_start)
+    // Save argc (a0) and argv (a1) provided by kernel to the stack
+    addi sp, sp, -16
+    sd a0, 0(sp)
+    sd a1, 8(sp)
+
+    // ... Clear BSS ...
+
+    // Restore arguments for main
+    ld a0, 0(sp)
+    ld a1, 8(sp)
+    addi sp, sp, 16
+
+    // Call main(argc, argv)
+    la t0, main
+    jalr t0
+
+    // Call sys_exit after main returns
+    li a7, 1 
+    ecall
+```
+
+---
+
+### Step 5: System Info (`do_process_show`)
+This implements the `ps` command. It iterates through the `pcb` array and prints the status of valid tasks.
+
+```c
+void do_process_show()
 {
-    list->next = list;
-    list->prev = list;
-}
-
-// add a new entry
-static void __list_add(list_node_t *new, list_node_t *prev, list_node_t *next)
-{
-    next->prev = new;
-    new->next = next;
-    new->prev = prev;
-    prev->next = new;
-}
-
-// add a new entry after the specified head
-void list_add(list_node_t *new, list_node_t *head)
-{
-    __list_add(new, head, head->next);
-}
-
-// add a new entry before the specified head
-void list_add_tail(list_node_t *new, list_node_t *head)
-{
-    __list_add(new, head->prev, head);
-}
-
-// deletes entry from list
-static void __list_del(list_node_t * prev, list_node_t * next)
-{
-    next->prev = prev;
-    prev->next = next;
-}
-
-void list_del(list_node_t *entry)
-{
-    __list_del(entry->prev, entry->next);
-    entry->next = (void *) 0;
-    entry->prev = (void *) 0;
+    bios_putstr("[PROCESS TABLE]\n");
+    // ... Loop through pcb[] ...
+    // Print PID, Status, Stack Pointers, CPU Core, Name
 }
 ```
 
-### Modifying `crt0.S`
+---
 
-We know that we've already set user stack while initializing the `PCB`s. However, after this initialization, the user application will first enter `crt0.S`, which, according to our code in Peoject 1, will set the user stack pointer again. So, we shall comment that line out:
+## 3. Verification
+1.  **Shell Startup:** On boot, the kernel loads `shell` as the first process. The prompt `> root@UCAS_OS:` appears.
+2.  **Execution:** Typing `exec print1` loads the `print1` task. The shell waits for it to finish (unless `&` is used).
+3.  **Arguments:** `exec waitpid` successfully passes arguments to the `waitpid` test program, which then spawns sub-processes.
+4.  **Process List:** Typing `ps` shows the shell and any currently running background tasks.
+5.  **Termination:** `exit()` correctly returns control to the shell. `kill <pid>` successfully stops infinite loops (like `exec print1 &`).
 
-```nasm
-    // li sp, USER_STACKPTR
+---
+
+# Project 3 Task 2: Synchronization Primitives Implementation Document
+
+## 1. Overview
+In Task 2, we extend the operating system's capabilities by introducing advanced synchronization and communication primitives. While Project 2 introduced basic Mutex locks, complex applications require more sophisticated coordination mechanisms.
+
+We implemented three specific primitives:
+1.  **Barriers**: To synchronize a group of processes at a specific point.
+2.  **Condition Variables**: To allow processes to wait for a specific state change while releasing a lock.
+3.  **Mailboxes**: A buffered Inter-Process Communication (IPC) mechanism allowing data exchange between processes.
+
+## 2. Prerequisites & Core Mechanisms
+These primitives rely on the scheduling and blocking mechanisms established in Project 2. Specifically, they utilize:
+*   **`do_block(pcb_node, queue)`**: Changes current task status to `TASK_BLOCKED`, adds it to a wait queue, and calls the scheduler.
+*   **`do_unblock(pcb_node)`**: Changes a task status to `TASK_READY`, moves it to the ready queue.
+*   **Spinlocks**: Used internally within the kernel to protect the metadata of these primitives from race conditions during modification.
+
+---
+
+## 3. Sub-Task 2.1: Barriers
+
+### 3.1. Data Structure (`include/os/lock.h`)
+A barrier maintains a target number of processes (`goal`) and a counter of how many have arrived (`count`). It also needs a queue to hold the waiting processes.
+
+```c
+typedef struct barrier
+{
+    int goal;               // Total number of processes to wait for
+    int count;              // Current number of processes waiting
+    list_head block_queue;  // Queue for blocked processes
+} barrier_t;
+
+#define BARRIER_NUM 16
+extern barrier_t barriers[BARRIER_NUM];
 ```
 
-## Task 2
+### 3.2. Kernel Implementation (`kernel/barrier/barrier.c`)
 
-### Implementing `do_block` and `do_unblock`
+#### Initialization
+We initialize a global array of barriers protected by a spinlock. `do_barrier_init` finds a free slot and sets the goal.
 
-The implementation of the two functions are as follows:
+#### Wait Logic (`do_barrier_wait`)
+This is the core logic. When a process calls wait:
+1.  It increments the arrival `count`.
+2.  **If `count < goal`**: The group isn't ready yet. The process blocks itself.
+3.  **If `count == goal`**: The group is complete. This last process resets the barrier for future use and **unblocks every process** currently sitting in the wait queue.
 
-```C
-// In sched.c
-
-void do_block(list_node_t *pcb_node, list_head *queue)
+```c
+void do_barrier_wait(int bar_idx)
 {
-    // TODO: [p2-task2] block the pcb task into the block queue
+    pcb_t *current_running = CURRENT_RUNNING;
 
-    // queue shall be the blocked queue
-    pcb_t *pcb = list_entry(pcb_node, pcb_t, list);
-    pcb->status = TASK_BLOCKED;
-    list_add_tail(pcb_node, queue);
+    spin_lock_acquire(&barriers_lock);
 
-    // call the scheduler to run a different task
+    barrier_t *barrier = &barriers[bar_idx];
+    barrier->count++;
+
+    if (barrier->count < barrier->goal) {
+        // Not the last process, block it
+        list_add_tail(&current_running->list, &barrier->block_queue);
+        current_running->status = TASK_BLOCKED;
+        
+        spin_lock_release(&barriers_lock);
+        do_scheduler(); // Yield CPU
+    } else {
+        // This is the last process to arrive
+        // Unblock all others
+        while (!list_is_empty(&barrier->block_queue)) {
+            list_node_t *node_to_unblock = barrier->block_queue.next;
+            do_unblock(node_to_unblock);
+        }
+
+        // Reset for next use
+        barrier->count = 0;
+        spin_lock_release(&barriers_lock);
+    }
+}
+```
+
+---
+
+## 4. Sub-Task 2.2: Condition Variables
+
+### 4.1. Data Structure (`include/os/lock.h`)
+A condition variable is essentially a queue of waiting processes. It does not hold state itself (unlike a semaphore); the state is external, protected by a mutex.
+
+```c
+typedef struct condition
+{
+    list_head block_queue;
+} condition_t;
+
+#define CONDITION_NUM 16
+```
+
+### 4.2. Kernel Implementation (`kernel/condition/condition.c`)
+
+#### Wait (`do_condition_wait`)
+This operation is atomic regarding the condition queue but involves releasing an external mutex.
+1.  **Release the Mutex**: The process holds a mutex when calling wait. It must release it so other processes (like a producer) can change the shared state.
+2.  **Block**: The process adds itself to the condition's `block_queue` and yields.
+3.  **Re-acquire Mutex**: When the process wakes up (signaled), it must re-acquire the mutex before returning to user space to ensure mutual exclusion is restored.
+
+```c
+void do_condition_wait(int cond_idx, int mutex_idx)
+{
+    pcb_t *current_running = CURRENT_RUNNING;
+
+    // 1. Release the associated mutex lock
+    do_mutex_lock_release(mutex_idx);
+
+    // 2. Block on condition variable
+    spin_lock_acquire(&cond_lock);
+    list_add_tail(&current_running->list, &conditions[cond_idx].block_queue);
+    current_running->status = TASK_BLOCKED;
+    spin_lock_release(&cond_lock);
+
     do_scheduler();
-}
 
-void do_unblock(list_node_t *pcb_node)
-{
-    // TODO: [p2-task2] unblock the `pcb` from the block queue
-
-    // set the pcb's status to TASK_READY
-    pcb_t *pcb = list_entry(pcb_node, pcb_t, list);
-    pcb->status = TASK_READY;
- 
-    // delete the `pcb` from the block queue
-    list_del(pcb_node);
-
-    // Append the pcb node to the ready_queue
-    list_add_tail(pcb_node, &ready_queue);
+    // 3. Re-acquire the mutex lock upon waking up
+    do_mutex_lock_acquire(mutex_idx);
 }
 ```
 
-> [!Note] The Job of `do_unblock`
-> The job of `do_unblock` is just to delete the `pcb_node` from the block queue, so there is no need to call the scheduler again at the end of this function.
+#### Signal and Broadcast
+*   `do_condition_signal`: Unblocks the head of the wait queue.
+*   `do_condition_broadcast`: Iterates through the queue and unblocks everyone.
 
-### Implementing Lock Related Functions
+---
 
-The spin clock are used to potect `mlocks` from racing conditions. Spin lock uses an atomic operation to acquire the lock, and enters a busy wait loop if the lock is currently unavailable.
+## 5. Sub-Task 2.3: Mailboxes (IPC)
 
-All the related functions are as follows:
+### 5.1. Data Structure (`include/os/lock.h`)
+The mailbox acts as a bounded buffer. To make it thread-safe and blocking, we use the synchronization primitives we just built (or internal equivalents): a Mutex for exclusion, and two Condition-like queues (or logic) for "Not Full" and "Not Empty".
 
-```C
-mutex_lock_t mlocks[LOCK_NUM];
-static spin_lock_t mlocks_lock;
-
-/* Initialize all locks */
-void init_locks(void)
+```c
+typedef struct mailbox
 {
-    /* TODO: [p2-task2] initialize mlocks */
-    for (int i = 0; i < LOCK_NUM; i++) {
-        mlocks[i].key = -1; // indicates unused
-        spin_lock_init(&mlocks[i].lock);
-        list_init(&mlocks[i].block_queue);
-        mlocks[i].status = UNLOCKED;
-    }
-    spin_lock_init(&mlocks_lock);
-}
+    char name[MAX_MBOX_LENGTH]; // For finding the mailbox by string
+    char buffer[MAX_MBOX_LENGTH]; // Circular buffer
+    int head;
+    int tail;
+    int used_space;
 
-/* Initialize spin lock */
-void spin_lock_init(spin_lock_t *lock)
+    int lock_idx;             // Mutex to protect the buffer
+    int not_full_cond_idx;    // Wait here if buffer is full
+    int not_empty_cond_idx;   // Wait here if buffer is empty
+} mailbox_t;
+```
+
+### 5.2. Kernel Implementation (`kernel/ipc/mailbox.c`)
+
+#### Open (`do_mbox_open`)
+Searches for a mailbox by name. If found, returns its index. If not, finds a free slot, initializes the mutex and condition variables (allocating new IDs for them), and zeroes the buffer.
+
+#### Send (`do_mbox_send`)
+Writes data to the mailbox.
+1.  Acquire the mailbox lock.
+2.  **While** there isn't enough space: Wait on `not_full_cond`.
+3.  Write bytes to the circular buffer.
+4.  Broadcast to `not_empty_cond` (readers might be waiting).
+5.  Release lock.
+
+```c
+int do_mbox_send(int mbox_idx, void *msg, int msg_length)
 {
-    /* TODO: [p2-task2] initialize spin lock */
-    lock->status = UNLOCKED;
-}
+    mailbox_t *mbox = &mailboxes[mbox_idx];
+    do_mutex_lock_acquire(mbox->lock_idx);
 
-/* Try to acquire spin lock, unused */
-int spin_lock_try_acquire(spin_lock_t *lock)
-{
-    /* TODO: [p2-task2] try to acquire spin lock */
-    return 0;
-}
-
-/* Acquire spin lock */
-void spin_lock_acquire(spin_lock_t *lock)
-{
-    /* TODO: [p2-task2] acquire spin lock */
-    while (atomic_swap(LOCKED, (ptr_t)&lock->status) == LOCKED);
-}
-
-/* Release spin lock */
-void spin_lock_release(spin_lock_t *lock)
-{
-    /* TODO: [p2-task2] release spin lock */
-    atomic_swap(UNLOCKED, (ptr_t)&lock->status);
-}
-
-/**
- * @brief Initialize mutex lock with the given key
- *
- * @param key The key to identify the mutex lock
- * @return The index of the initialized mutex lock
- */
-int do_mutex_lock_init(int key)
-{
-    /* TODO: [p2-task2] initialize mutex lock */
-    spin_lock_acquire(&mlocks_lock);
-
-    // Check if a lock with this key already exists
-    for (int i = 0; i < LOCK_NUM; i++) {
-        if (mlocks[i].key == key) {
-            spin_lock_release(&mlocks_lock);
-            return i;
-        }
+    // Block if not enough space
+    while (MAX_MBOX_LENGTH - mbox->used_space < msg_length) {
+        do_condition_wait(mbox->not_full_cond_idx, mbox->lock_idx);
     }
 
-    // If not, find an unused lock to initialize
-    int free_idx = -1;
-    for (int i = 0; i < LOCK_NUM; i++) {
-        if (mlocks[i].key == -1) {
-            free_idx = i;
-            break;
-        }
+    // Circular buffer write
+    for (int i = 0; i < msg_length; i++) {
+        mbox->buffer[mbox->tail] = ((char *)msg)[i];
+        mbox->tail = (mbox->tail + 1) % MAX_MBOX_LENGTH;
     }
+    mbox->used_space += msg_length;
 
-    if (free_idx != -1) {
-        mlocks[free_idx].key = key;
-    }
+    // Wake up readers
+    do_condition_broadcast(mbox->not_empty_cond_idx);
 
-    spin_lock_release(&mlocks_lock);
-    return free_idx;
-}
-
-/**
- * @brief Acquire the mutex lock at the given index
- *
- * @param mlock_idx The index of the mutex lock to acquire
- */
-void do_mutex_lock_acquire(int mlock_idx)
-{
-    /* TODO: [p2-task2] acquire mutex lock */
-    mutex_lock_t *lock = &mlocks[mlock_idx];
-
-    while (1) {
-        // Acquire the internal spinlock to check the mutex status safely
-        spin_lock_acquire(&lock->lock);
-
-        if (lock->status == UNLOCKED) {
-            // Lock is free, so we take it
-            lock->status = LOCKED;
-            spin_lock_release(&lock->lock);
-            break; // Exit the loop, we have the lock
-        } else {
-            // Lock is busy, so we must block
-            current_running->status = TASK_BLOCKED;
-            list_add_tail(&current_running->list, &lock->block_queue);
-
-            // Release the spinlock *before* sleeping
-            spin_lock_release(&lock->lock);
-            do_scheduler();
-
-            // When we wake up, loop back to try acquiring the lock again
-        }
-    }
-}
-
-/**
- * @brief Release the mutex lock at the given index
- *
- * @param mlock_idx The index of the mutex lock to release
- */
-void do_mutex_lock_release(int mlock_idx)
-{
-    /* TODO: [p2-task2] release mutex lock */
-    mutex_lock_t *lock = &mlocks[mlock_idx];
-    // protect muttex's metadata from racing condition
-    spin_lock_acquire(&lock->lock);
-    if (!list_is_empty(&lock->block_queue)) {
-        // Other tasks are waiting for the lock. Get the first one.
-        list_node_t *first_node = lock->block_queue.next;
-        pcb_t *first_waiting_pcb = list_entry(first_node, pcb_t, list);
-
-        // Unblock it, transferring lock ownership.
-        do_unblock(&first_waiting_pcb->list);
-    }
-
-    // No tasks are waiting, release the lock
-    lock->status = UNLOCKED;
-
-    // release spin lock before return
-    spin_lock_release(&lock->lock);
+    do_mutex_lock_release(mbox->lock_idx);
+    return msg_length;
 }
 ```
 
-To be clearer, this is the full execution flow when `lock1` and `lock2` are executed simultaneously:
+#### Receive (`do_mbox_recv`)
+Reads data from the mailbox.
+1.  Acquire lock.
+2.  **While** there isn't enough data: Wait on `not_empty_cond`.
+3.  Read bytes from circular buffer.
+4.  Broadcast to `not_full_cond` (writers might be waiting).
+5.  Release lock.
 
-**1. Setup: Starting the Tasks**
-
-1.  **Command**: You run `demo_2_1 lock1 lock2` in the shell.
-2.  **`cmd_demo_2_1`**: This function in `init/cmd.c` is executed.
-    *   It parses the arguments "lock1" and "lock2".
-    *   It loops through these names and for each one:
-        *   It finds the corresponding `task_info_t` for the application.
-        *   It calls `load_task_img` to load the application's code into memory.
-        *   It allocates a new PCB (`pcb_t`) for the task.
-        *   It calls `init_pcb_stack` to set up the initial kernel and user stacks for the new task, preparing a "fake" context so the scheduler can switch to it for the first time.
-        *   Finally, it adds the new PCB to the `ready_queue`.
-3.  **Ready to Go**: At this point, both `lock1` and `lock2` are in the `TASK_READY` state and are waiting in the `ready_queue`. The system then starts the scheduler by calling `do_scheduler()`.
-
-**2. The Dance Begins: First Run and Lock Initialization**
-
-The scheduler is a simple round-robin. It picks the first task from the `ready_queue`. Let's assume the order is `lock1`, then `lock2`.
-
-**`lock1`'s First Turn:**
-1.  `do_scheduler` switches context to `lock1`. `lock1` begins executing its main function.
-2.  `sys_mutex_init(42)` is called. This is a syscall that jumps into the kernel's `do_mutex_lock_init` function.
-3.  `do_mutex_lock_init` sees that no lock with `key = 42` exists. It finds a free lock from the global `mlocks` array (let's say at index 0), sets its key to 42, and returns the index 0 as the handle. `lock1` now has `mutex_id = 0`.
-4.  `lock1` prints `> [TASK] Applying for a lock..`
-5.  `sys_yield()` is called. This tells the scheduler: "I'm done with my turn for now." `do_scheduler` is invoked, `lock1`'s PCB is put at the back of the `ready_queue`, and the next task is chosen.
-
-**`lock2`'s First Turn:**
-1.  `do_scheduler` switches context to `lock2`.
-2.  `sys_mutex_init(42)` is called. It jumps to `do_mutex_lock_init`.
-3.  This time, the function finds a lock with `key = 42` already exists at index 0. It simply returns the existing handle 0. Now both tasks know that `mutex_id = 0` refers to the same kernel-managed lock.
-4.  `lock2` prints `> [TASK] Applying for a lock..`
-5.  `sys_yield()` is called. `lock2` goes to the back of the `ready_queue`.
-
-**3. Contention: Acquiring and Blocking**
-
-**`lock1`'s Second Turn (Acquiring the Lock):**
-1.  The scheduler picks `lock1` again.
-2.  `sys_mutex_acquire(0)` is called, jumping to `do_mutex_lock_acquire`.
-3.  Inside `do_mutex_lock_acquire`, it checks `mlocks[0].status`. It's `UNLOCKED`.
-4.  Success! It atomically sets `mlocks[0].status = LOCKED` and returns.
-5.  `lock1` now owns the lock. It enters its for loop and prints `> [TASK] Has acquired lock and running.(0)`.
-6.  `sys_yield()` is called. `lock1` goes to the back of the `ready_queue`.
-
-**`lock2`'s Second Turn (Blocking):**
-1.  The scheduler picks `lock2`.
-2.  `sys_mutex_acquire(0)` is called, jumping to `do_mutex_lock_acquire`.
-3.  It checks `mlocks[0].status`. This time, it's `LOCKED`.
-4.  The `else` branch is taken:
-    *   `lock2`'s status is set to `TASK_BLOCKED`.
-    *   Its PCB is removed from the `ready_queue` and added to the `mlocks[0].block_queue`.
-    *   `do_scheduler()` is called directly from within the acquire function. This is the key part you asked about. Because `lock2` cannot proceed, it must give up the CPU. The scheduler is called to pick another task.
-5.  `lock2` is now sleeping in the lock's private waiting queue. It will not be scheduled again until it is unblocked.
-
-**4. Resolution: Releasing and Unblocking**
-
-The `ready_queue` now only contains `lock1`.
-
-**`lock1`'s Subsequent Turns:**
-1.  The scheduler has no choice but to run `lock1`.
-2.  `lock1` continues its for loop, printing its "running" message and yielding. Each time it yields, the scheduler just picks it right back up because it's the only ready task.
-3.  After the loop finishes, `lock1` prints `> [TASK] Has acquired lock and exited..`
-4.  `sys_mutex_release(0)` is called. This is where the magic happens.
-
-**Inside `do_mutex_lock_release` (The Fix):**
-1.  The function sees that `mlocks[0].block_queue` is not empty (it contains `lock2`).
-2.  It takes `lock2`'s PCB from the `block_queue` and calls `do_unblock`.
-3.  `do_unblock` changes `lock2`'s status back to `TASK_READY` and puts it back in the main `ready_queue`.
-4.  This is the critical fix we made: The function then sets `mlocks[0].status = UNLOCKED`. The lock is now free.
-5.  `lock1` returns from the syscall and calls `sys_yield()`.
-
-**5. The Cycle Repeats**
-
-1.  `lock1` is at the back of the `ready_queue`. `lock2` is now at the front.
-2.  The scheduler picks `lock2`.
-3.  `lock2` resumes execution exactly where it left off: inside `do_mutex_lock_acquire`, right after its call to `do_scheduler()`.
-4.  It loops back to the top of the `while(1)`. This time, when it checks `mlocks[0].status`, it finds it `UNLOCKED`.
-5.  It successfully acquires the lock, sets the status to `LOCKED`, and finally breaks out of the `while` loop.
-6.  `lock2` proceeds to its critical section, printing "Has acquired lock and running...".
-
-The two tasks will now safely alternate, with one always waiting in the `block_queue` while the other is in its critical section. This is the essence of mutual exclusion.
-
-## Task 3
-
-Here is the full execution process of task3:
-
-**Phase 1: Kernel Initialization**
-
-1.  **`main()` starts**: The kernel begins execution.
-2.  **`init_syscall()`**: You populate the `syscall` array, mapping numbers like `SYSCALL_YIELD` to kernel function addresses like `&do_scheduler`.
-3.  **`init_pcb()`**:
-    *   For each task (lock1, fly, etc.):
-    *   The task's code is loaded into memory.
-    *   A kernel stack and a user stack are allocated.
-    *   **`init_pcb_stack()`** is called. It creates a fake exception frame on the kernel stack. This frame is meticulously crafted to make it look like the task was already running in User Mode and was interrupted.
-        > `sepc` is set to the task's starting address.
-        >
-        > `sstatus` is set to return to User Mode with interrupts enabled.
-        >
-        > The user `sp` is set.
-        >
-        > The `switch_to` context's `ra` is set to `ret_from_exception`.
-    *   The new PCB is added to the `ready_queue`.
-4.  **`do_scheduler()`** is called: The main loop kicks off the scheduler for the first time.
-
-**Phase 2: The First Context Switch**
-
-1.  **`do_scheduler()`**:
-    *   It picks the first task (e.g., lock1) from the `ready_queue`.
-    *   It calls `switch_to(pid0_pcb, lock1_pcb)`.
-2.  **`switch_to()`**:
-    *   It saves the callee-saved registers for the current task (`pid0_pcb`).
-    *   It loads `lock1_pcb->kernel_sp` into the `sp` register. This now points to the fake `switch_to` context you created.
-    *   It restores the callee-saved registers from this fake context. The most important one is `ra`, which now holds the address of `ret_from_exception`.
-    *   `switch_to` executes a `ret` instruction. Instead of returning to `do_scheduler`, it jumps to `ret_from_exception`.
-
-**Phase 3: Starting the User Task**
-
-1.  **`ret_from_exception()`**:
-    *   It calls `RESTORE_CONTEXT`, which loads the registers from your fake exception frame.
-    *   It performs the final `csrrw sp, sscratch, sp` to switch to the user stack.
-    *   It executes `sret`.
-2.  **`sret` Hardware Magic**: The CPU hardware reads the restored CSRs:
-    *   It sees `sepc` points to the start of lock1's `main` function.
-    *   It sees `sstatus.SPP` is 0, so it changes the privilege level to User Mode.
-    *   It sees `sstatus.SPIE` is 1, so it re-enables interrupts.
-    *   It jumps to the address in `sepc`.
-3.  **User Code Runs**: `lock1` is now executing its own code, in User Mode, on its own stack.
-
-**Phase 4: The System Call**
-
-1.  **`sys_mutex_acquire()`**: The user task calls a C library function.
-2.  **`invoke_syscall()`**: This function in `tiny_libc` is called.
-    *   It puts the syscall number (`SYSCALL_LOCK_ACQ`) into register `a7`.
-    *   It puts the arguments (the mutex id) into `a0`.
-    *   It executes the `ecall` instruction.
-3.  **Trap!**: The CPU detects the `ecall` from User Mode. This is an exception.
-    *   The CPU automatically disables interrupts, saves the current PC (the instruction after `ecall`) into `sepc`, saves the current privilege mode, and switches to Supervisor Mode.
-    *   It jumps to the address stored in the `stvec` register, which is `exception_handler_entry`.
-
-**Phase 5: Kernel Handling and Return**
-
-1.  **`exception_handler_entry`**:
-    *   `SAVE_CONTEXT` runs, swapping to the kernel stack and saving all user registers onto it.
-    *   It sets `ra` to point to `ret_from_exception`.
-    *   It calls `interrupt_helper(context_ptr, stval, scause)`.
-2.  **`interrupt_helper()`**: It checks `scause`, sees it's a syscall, and calls `handle_syscall()`.
-3.  **`handle_syscall()`**:
-    *   It looks at the saved `a7` to identify the syscall number.
-    *   It finds `do_mutex_lock_acquire` in the `syscall` array.
-    *   It calls `do_mutex_lock_acquire()`, passing the saved `a0` as the argument.
-    *   `do_mutex_lock_acquire` runs. Let's say it blocks. It will call `do_scheduler()`, which will `switch_to` another task (like lock2). The process repeats from Phase 2 for the new task.
-4.  **Return Path**: Eventually, a syscall finishes without blocking.
-    *   `handle_syscall` gets the return value and writes it into the saved `a0` on the stack.
-    *   It increments the saved `sepc` by 4 to avoid re-executing the `ecall`.
-    *   All the C functions return, eventually returning to the address in `ra`, which is `ret_from_exception`.
-5.  **`ret_from_exception()`**: It restores the (now possibly modified) context, swaps back to the user stack, and executes `sret`.
-6.  **Back to User**: The user task resumes execution at the instruction right after the `ecall`, with the syscall's return value in its `a0` register, completely unaware of the complex dance that just happened.
-
-### Implementation Steps & Modifications:
-
-#### Trap Vector Setup (`trap.S`, `irq.c`):
-*   Implemented `setup_exception` in `trap.S` to write the address of `exception_handler_entry` into the `stvec` CSR, informing the CPU where to jump on an exception.
-
-```nasm
-// In trap.S
-ENTRY(setup_exception)
-
-  /* TODO: [p2-task3] save exception_handler_entry into STVEC */
-  la t0, exception_handler_entry
-  csrw stvec, t0
-
-  /* TODO: [p2-task4] enable interrupts globally */
-
-ENDPROC(setup_exception)
-```
-
-*   Ensured `setup_exception` is called from `init_exception` in `irq.c`.
-
-```C
-// In irq.c
-void init_exception()
+```c
+int do_mbox_recv(int mbox_idx, void *msg, int msg_length)
 {
-    /* TODO: [p2-task3] initialize exc_table */
-    /* NOTE: handle_syscall, handle_other, etc.*/
-    exc_table[EXCC_SYSCALL] = (handler_t)&handle_syscall;
+    mailbox_t *mbox = &mailboxes[mbox_idx];
+    do_mutex_lock_acquire(mbox->lock_idx);
 
-    /* TODO: [p2-task4] initialize irq_table */
-    /* NOTE: handle_int, handle_other, etc.*/
+    // Block if not enough data
+    while (mbox->used_space < msg_length) {
+        do_condition_wait(mbox->not_empty_cond_idx, mbox->lock_idx);
+    }
 
-    /* TODO: [p2-task3] set up the entrypoint of exceptions */
-    setup_exception();
+    // Circular buffer read
+    for (int i = 0; i < msg_length; i++) {
+        ((char *)msg)[i] = mbox->buffer[mbox->head];
+        mbox->head = (mbox->head + 1) % MAX_MBOX_LENGTH;
+    }
+    mbox->used_space -= msg_length;
+
+    // Wake up writers
+    do_condition_broadcast(mbox->not_full_cond_idx);
+
+    do_mutex_lock_release(mbox->lock_idx);
+    return msg_length;
 }
 ```
 
-#### Exception Entry (`entry.S`):
-*   **`SAVE_CONTEXT` Macro:** Implemented to perform the critical task of switching from the user stack to a dedicated kernel stack (`csrrw sp, sscratch, sp`) and saving all user-mode general-purpose registers and relevant CSRs (`sstatus`, `sepc`, `scause`, `stval`) onto the kernel stack.
+---
 
-```nasm
-// In entry.S
-.macro SAVE_CONTEXT
-  /* TODO: [p2-task3] save all general purpose registers here! */
-  /* HINT: Pay attention to the function of tp and sp, and save them carefully! */
+## 6. System Call Registration
 
-  # Resume kernel sp from sscratch
-  csrrw sp, sscratch, sp
+To expose these features to user space, we updated the system call table and wrappers.
 
-  # Decrease the stack pointer to allocate space for the context
-  addi sp, sp, -OFFSET_SIZE
+1.  **`include/asm/unistd.h`**: Added syscall numbers (e.g., `SYSCALL_BARR_INIT 44`, `SYSCALL_MBOX_OPEN 52`).
+2.  **`tiny_libc/syscall.c`**: Implemented user-space stubs that use `invoke_syscall` (e.g., `sys_barrier_wait`).
+3.  **`init/main.c`**: Mapped the numbers to kernel functions in `init_syscall()`:
+    ```c
+    syscall[SYSCALL_BARR_WAIT] = (long (*)())&do_barrier_wait;
+    syscall[SYSCALL_MBOX_SEND] = (long (*)())&do_mbox_send;
+    // ... etc
+    ```
 
-  # Store general-purpose registers
-  sd ra, OFFSET_REG_RA(sp)
-  // sd sp, OFFSET_REG_SP(sp) (Now we store sp last)
-  sd gp, OFFSET_REG_GP(sp)
-  // sd tp, OFFSET_REG_TP(sp)
-  sd t0, OFFSET_REG_T0(sp)
-  sd t1, OFFSET_REG_T1(sp)
-  sd t2, OFFSET_REG_T2(sp)
-  sd s0, OFFSET_REG_S0(sp)
-  sd s1, OFFSET_REG_S1(sp)
-  sd a0, OFFSET_REG_A0(sp)
-  sd a1, OFFSET_REG_A1(sp)
-  sd a2, OFFSET_REG_A2(sp)
-  sd a3, OFFSET_REG_A3(sp)
-  sd a4, OFFSET_REG_A4(sp)
-  sd a5, OFFSET_REG_A5(sp)
-  sd a6, OFFSET_REG_A6(sp)
-  sd a7, OFFSET_REG_A7(sp)
-  sd s2, OFFSET_REG_S2(sp)
-  sd s3, OFFSET_REG_S3(sp)
-  sd s4, OFFSET_REG_S4(sp)
-  sd s5, OFFSET_REG_S5(sp)
-  sd s6, OFFSET_REG_S6(sp)
-  sd s7, OFFSET_REG_S7(sp)
-  sd s8, OFFSET_REG_S8(sp)
-  sd s9, OFFSET_REG_S9(sp)
-  sd s10, OFFSET_REG_S10(sp)
-  sd s11, OFFSET_REG_S11(sp)
-  sd t3, OFFSET_REG_T3(sp)
-  sd t4, OFFSET_REG_T4(sp)
-  sd t5, OFFSET_REG_T5(sp)
-  sd t6, OFFSET_REG_T6(sp)
+---
 
-  # Logic to store the ORIGINAL sp
-  csrr t0, sscratch
-  sd t0, OFFSET_REG_SP(sp)
+## 7. Verification Results
 
-  /* TODO: [p2-task3] save sstatus, sepc, stval and scause on kernel stack */
+### Barrier Test (`test_barrier.c`)
+*   **Scenario:** 3 tasks start. Each loops 10 times. In each loop, they print "Ready...", call `barrier_wait`, then print "Exited...".
+*   **Result:** The output shows all tasks printing "Ready" for round $N$ before any task prints "Exited" for round $N$. They move in lockstep.
 
-  # Store privileged registers (CSRs)
-  csrr t0, sstatus
-  sd t0, OFFSET_REG_SSTATUS(sp)
-  csrr t0, sepc
-  sd t0, OFFSET_REG_SEPC(sp)
-  csrr t0, stval
-  sd t0, OFFSET_REG_SBADADDR(sp)
-  csrr t0, scause
-  sd t0, OFFSET_REG_SCAUSE(sp)
+### Condition Variable Test (`condition.c` / `producer.c` / `consumer.c`)
+*   **Scenario:** 1 Producer, 3 Consumers. Producer generates items into a shared integer (protected by lock + condition).
+*   **Result:** Consumers wait when the item count is 0. When the producer increments the count and signals, a consumer wakes up and consumes. The total produced equals total consumed.
 
-  /*
-   * Disable user-mode memory access as it should only be set in the
-   * actual user copy routines.
-   *
-   * Disable the FPU to detect illegal usage of floating point in kernel
-   * space.
-   */
-  li t0, SR_SUM | SR_FS
+### Mailbox Test (`mbox_server.c` / `mbox_client.c`)
+*   **Scenario:** Clients send random strings to `str-message-mbox`. Server reads them and verifies checksums.
+*   **Result:** The server successfully receives messages from multiple clients. When the internal buffer (64 bytes) fills up, senders block correctly until the server reads data. No data corruption occurs.
 
+---
 
-.endm
+# Project 3 Task 3: Multicore (SMP) Support Implementation Document
+
+## 1. Overview
+The goal of Task 3 is to transition the operating system from a single-core environment to a **Symmetric Multi-Processing (SMP)** system. This allows the OS to utilize both cores of the RISC-V processor (Hart 0 and Hart 1) simultaneously.
+
+To achieve this safely, we must implement:
+1.  **Multicore Boot Sequence:** Distinguishing between the main core and secondary core during startup.
+2.  **Per-CPU Data Structures:** Giving each core its own kernel stack and `current_running` pointer.
+3.  **The Big Kernel Lock (BKL):** A coarse-grained lock to ensure that only one core accesses critical kernel data (like the ready queue) at a time.
+4.  **Inter-Processor Interrupts (IPI):** Mechanisms to wake up the secondary core.
+
+---
+
+## 2. Implementation Steps
+
+### Step 1: Entry Point Modifications (`arch/riscv/kernel/head.S`)
+When the system powers on, both cores execute the bootloader and jump to the kernel entry point (`_start`). We must distinguish them to prevent them from using the same stack memory, which would cause immediate corruption.
+
+**Implementation Logic:**
+1.  Read the `mhartid` (Hardware Thread ID) CSR.
+2.  **If Hart 0:** Setup the main `KERNEL_STACK`, set the Thread Pointer (`tp`) to `cpu_table[0]`, and jump to `main`.
+3.  **If Hart 1:** Jump to `s_start`, setup the `S_KERNEL_STACK`, set `tp` to `cpu_table[1]`, and jump to `main`.
+
+**Code Changes:**
+```asm
+ENTRY(_start)
+  // ... interrupt masking ...
+
+  // Core-based execution flow
+  csrr t0, CSR_MHARTID
+  bnez t0, s_start
+
+  // --- HART 0 SETUP ---
+  // ... Clear BSS ...
+  li sp, KERNEL_STACK        // Master Kernel Stack
+  la tp, cpu_table           // Point tp to cpu_table[0]
+  jal main
+
+  // --- HART 1 SETUP ---
+s_start:
+  la sp, S_KERNEL_STACK      // Secondary Kernel Stack
+  la tp, cpu_table
+  addi tp, tp, 8             // Point tp to cpu_table[1] (offset by sizeof(cpu_t))
+  jal main
 ```
 
-*   **`exception_handler_entry`:** The assembly entry point for all exceptions. It orchestrates the `SAVE_CONTEXT`, sets up the return address (`ra`) to `ret_from_exception`, and calls the C-level `interrupt_helper` with the exception frame pointer, `stval`, and `scause`.
+---
 
-```nasm
+### Step 2: Per-CPU Data Structures (`include/os/sched.h`)
+In a single-core OS, `current_running` was a global pointer. In SMP, each core runs a different task simultaneously. Therefore, `current_running` must be specific to the core.
+
+**Implementation Logic:**
+1.  Define a `cpu_t` struct to hold per-core data.
+2.  Create a global `cpu_table` array.
+3.  Redefine the `CURRENT_RUNNING` macro. Instead of reading a global variable, it uses the `tp` register (which we set up in Step 1) to find the local pointer.
+
+**Code Changes:**
+```c
+// include/os/sched.h
+
+// Multi-core related data structures
+typedef struct cpu {
+    pcb_t *current_running;
+} cpu_t;
+
+// Global array for CPUs
+extern cpu_t cpu_table[NR_CPUS];
+
+// Macro to get the current PCB based on the tp register
+#define CURRENT_RUNNING \
+    ({ \
+        cpu_t *cpu; \
+        asm volatile("mv %0, tp" : "=r"(cpu)); \
+        cpu->current_running; \
+    })
+
+// Macro to set the current PCB
+#define SET_CURRENT_RUNNING(pcb_ptr) \
+    ({ \
+        cpu_t *cpu; \
+        asm volatile("mv %0, tp" : "=r"(cpu)); \
+        cpu->current_running = pcb_ptr; \
+    })
+```
+
+---
+
+### Step 3: The Big Kernel Lock (`kernel/smp/smp.c`)
+Because our kernel data structures (like the `ready_queue`, `pcb` array, and memory allocator) are not yet designed for concurrent access, we implement a **Big Kernel Lock (BKL)**. This ensures that only one core can be executing inside the kernel (handling a syscall or interrupt) at any specific moment.
+
+**Implementation Logic:**
+We use a **Spinlock** for the BKL because a core waiting to enter the kernel cannot sleep (sleeping requires entering the kernel scheduler, which requires the lock).
+
+**Code Changes:**
+```c
+static spin_lock_t kernel_lock;
+
+void smp_init() {
+    spin_lock_init(&kernel_lock);
+}
+
+void lock_kernel() {
+    spin_lock_acquire(&kernel_lock);
+}
+
+void unlock_kernel() {
+    spin_lock_release(&kernel_lock);
+}
+```
+
+---
+
+### Step 4: Applying the Lock (`arch/riscv/kernel/entry.S`)
+We must acquire the lock whenever a trap occurs (entering kernel mode) and release it before returning to user mode.
+
+**Implementation Logic:**
+1.  **Exception Entry:** Call `lock_kernel` immediately after `SAVE_CONTEXT`. This forces the secondary core to wait if the main core is already handling a trap.
+2.  **Exception Return:** Call `unlock_kernel` immediately before `RESTORE_CONTEXT`.
+
+**Code Changes:**
+```asm
 ENTRY(exception_handler_entry)
-
-  /* TODO: [p2-task3] save context via the provided macro */
   SAVE_CONTEXT
+  
+  // Acquire BKL before touching kernel structures
+  call lock_kernel  
 
-  /* TODO: [p2-task3] load ret_from_exception into $ra so that we can return to
-   * ret_from_exception when interrupt_help complete.
-   */
-.data
-dbg_trap_msg:
-  .string "[DEBUG] Trap! scause: 0x%lx, sepc: 0x%lx, stval: 0x%lx\n"
-dbg_switch_msg:
-  .string "[DEBUG] Switch from pid %d to pid %d\n"
-
-.text
-  //  // -- DEBUG PRINT --
-  //  // Temporarily save a0-a3 to print debug info
-  //  addi sp, sp, -32
-  //  sd a0, 0(sp)
-  //  sd a1, 8(sp)
-  //  sd a2, 16(sp)
-  //  sd a3, 24(sp)
-  //
-  //  // Load arguments for printk
-  //  la a0, dbg_trap_msg
-  //  csrr a1, scause
-  //  csrr a2, sepc
-  //  csrr a3, stval
-  //  call printk
-  //
-  //  // Restore a0-a3
-  //  ld a0, 0(sp)
-  //  ld a1, 8(sp)
-  //  ld a2, 16(sp)
-  //  ld a3, 24(sp)
-  //  addi sp, sp, 32
-  //  // -- END DEBUG PRINT --
-
-  la ra, ret_from_exception
-
-
-  /* TODO: [p2-task3] call interrupt_helper
-   * NOTE: don't forget to pass parameters for it.
-   */
-  addi a0, sp, 0
-  csrr a1, stval
-  csrr a2, scause
-
-  la t0, interrupt_helper
-  jalr x0, t0, 0
-
-
+  // ... call interrupt_helper ...
 ENDPROC(exception_handler_entry)
-```
 
-#### Exception Return (`entry.S`):
-*   **`RESTORE_CONTEXT` Macro:** Implemented as the mirror image of `SAVE_CONTEXT`, restoring all saved registers and CSRs from the kernel stack. Crucially, it avoids restoring the `tp` register from the user context.
-
-```nasm
-// In entry.S
-.macro RESTORE_CONTEXT
-  /* TODO: Restore all general purpose registers and sepc, sstatus */
-  /* HINT: Pay attention to sp again! */
-
-  # Restore CSRs from the stack frame.
-  ld t0, OFFSET_REG_SSTATUS(sp)
-  csrw sstatus, t0
-  ld t0, OFFSET_REG_SEPC(sp)
-  csrw sepc, t0
-  ld t0, OFFSET_REG_SBADADDR(sp)
-  csrw stval, t0
-  ld t0, OFFSET_REG_SCAUSE(sp)
-  csrw scause, t0
-
-  # Prepare for the final atomic swap by loading the user's
-  # stack pointer into the sscratch register.
-  ld t0, OFFSET_REG_SP(sp)
-  csrw sscratch, t0
-
-  # Load all general-purpose registers from the stack frame.
-  # Note: sp (x2) is NOT restored here. It will be restored atomically later.
-  ld ra, OFFSET_REG_RA(sp)
-  ld gp, OFFSET_REG_GP(sp)
-  // ld tp, OFFSET_REG_TP(sp)
-  ld t0, OFFSET_REG_T0(sp)
-  ld t1, OFFSET_REG_T1(sp)
-  ld t2, OFFSET_REG_T2(sp)
-  ld s0, OFFSET_REG_S0(sp)
-  ld s1, OFFSET_REG_S1(sp)
-  ld a0, OFFSET_REG_A0(sp)
-  ld a1, OFFSET_REG_A1(sp)
-  ld a2, OFFSET_REG_A2(sp)
-  ld a3, OFFSET_REG_A3(sp)
-  ld a4, OFFSET_REG_A4(sp)
-  ld a5, OFFSET_REG_A5(sp)
-  ld a6, OFFSET_REG_A6(sp)
-  ld a7, OFFSET_REG_A7(sp)
-  ld s2, OFFSET_REG_S2(sp)
-  ld s3, OFFSET_REG_S3(sp)
-  ld s4, OFFSET_REG_S4(sp)
-  ld s5, OFFSET_REG_S5(sp)
-  ld s6, OFFSET_REG_S6(sp)
-  ld s7, OFFSET_REG_S7(sp)
-  ld s8, OFFSET_REG_S8(sp)
-  ld s9, OFFSET_REG_S9(sp)
-  ld s10, OFFSET_REG_S10(sp)
-  ld s11, OFFSET_REG_S11(sp)
-  ld t3, OFFSET_REG_T3(sp)
-  ld t4, OFFSET_REG_T4(sp)
-  ld t5, OFFSET_REG_T5(sp)
-  ld t6, OFFSET_REG_T6(sp)
-
-  # Deallocate the exception frame from the kernel stack.
-  addi sp, sp, OFFSET_SIZE
-
-.endm
-```
-
-*   **`ret_from_exception`:** Handles the final steps: calls `RESTORE_CONTEXT`, increments `sepc` by 4 (for ecalls to prevent re-execution), performs the final stack swap (`csrrw sp, sscratch, sp`), and executes `sret` to return to user mode.
-
-```nasm
-// In entry.S
 ENTRY(ret_from_exception)
-  /* TODO: [p2-task3] restore context via provided macro and return to sepc */
-  /* HINT: remember to check your sp, does it point to the right address? */
+  // Release BKL before going back to user space
+  call unlock_kernel
+
   RESTORE_CONTEXT
-
-  # Increment sepc for syscalls, prevent re-executing the ecall.
-  # HANDLES THIS IN syscall.c
-  # csrr t0, sepc
-  # addi t0, t0, 4
-  # csrw sepc, t0
-
-  # Finally, atomically swap sp with sscratch to restore the user's sp
-  # and simultaneously save the kernel's sp in sscratch for the next trap.
-  csrrw sp, sscratch, sp
-
   sret
 ENDPROC(ret_from_exception)
 ```
 
-#### C-Level Exception Dispatch (`irq.c`):
-*   **`init_exception`:** Initialized `exc_table` to map exception codes to their respective C handlers (e.g., `EXCC_SYSCALL` to `handle_syscall`).
-
-```C
-// In irq.c
-void init_exception()
-{
-    /* TODO: [p2-task3] initialize exc_table */
-    /* NOTE: handle_syscall, handle_other, etc.*/
-    exc_table[EXCC_SYSCALL] = (handler_t)&handle_syscall;
-
-    /* TODO: [p2-task4] initialize irq_table */
-    /* NOTE: handle_int, handle_other, etc.*/
-
-    /* TODO: [p2-task3] set up the entrypoint of exceptions */
-    setup_exception();
-}
-```
-
-*   **`interrupt_helper`:** The main C dispatcher. It examines the `scause` register to determine if the trap is an interrupt or an exception, and then calls the appropriate handler from `irq_table` or `exc_table`.
-
-```C
-// In irq.c
-void interrupt_helper(regs_context_t *regs, uint64_t stval, uint64_t scause)
-{
-    // TODO: [p2-task3] & [p2-task4] interrupt handler.
-    // call corresponding handler by the value of `scause`
-    uint64_t exc_code = scause & (~SCAUSE_IRQ_FLAG);
-    if ((scause & SCAUSE_IRQ_FLAG) > 0) {
-        ((handler_t)irq_table[exc_code])(regs, stval, scause);
-    } else {
-        ((handler_t)exc_table[exc_code])(regs, stval, scause);
-    }
-}
-```
-
-#### System Call Handling (`syscall.c`):
-*   **`handle_syscall`:** The central system call handler. It extracts the syscall number (from `a7` in the saved context) and arguments (from `a0-a5`), looks up the corresponding kernel function in the `syscall` array, calls it, and places the return value back into `a0` of the saved context. It also increments `sepc` by 4.
-
-```C
-// In syscall.c
-void handle_syscall(regs_context_t *regs, uint64_t interrupt, uint64_t cause)
-{
-    dbprint("Syscall num: %d\n", regs->regs[17]);
-    /* TODO: [p2-task3] handle syscall exception */
-    /**
-     * HINT: call syscall function like syscall[fn](arg0, arg1, arg2),
-     * and pay attention to the return value and sepc
-     */
-
-    // riscv calling convention
-    // Syscall number: a7 (idx = x17)
-    // Syscall arg n : an (idx = 10 + n)
-    uint64_t arg0 = regs->regs[10];
-    uint64_t arg1 = regs->regs[11];
-    uint64_t arg2 = regs->regs[12];
-    uint64_t arg3 = regs->regs[13];
-    uint64_t arg4 = regs->regs[14];
-    uint64_t arg5 = regs->regs[15];
-    uint64_t ret_val = ((long (*)())syscall[regs->regs[17]])(arg0, arg1, arg2, arg3, arg4, arg5);
-
-    // Handling ret_val
-    regs->regs[10] = ret_val;
-
-    // Increasing `sepc` to prevent re-execution of the syscall
-    regs->sepc += 4;
-}
-```
-
-*   **`init_syscall` (in `main.c`):** Populated the `syscall` array with pointers to the actual kernel implementation functions (e.g., `do_scheduler`, `do_sleep`, `screen_write`, `do_mutex_lock_acquire`).
-
-```C
-// In main.c
-static void init_syscall(void)
-{
-    // TODO: [p2-task3] initialize system call table.
-    syscall[SYSCALL_SLEEP] = (long (*)())&do_sleep;
-    syscall[SYSCALL_YIELD] = (long (*)())&do_scheduler;
-    syscall[SYSCALL_WRITE] = (long (*)())&screen_write;
-    syscall[SYSCALL_CURSOR] = (long (*)())&screen_move_cursor;
-    syscall[SYSCALL_REFLUSH] = (long (*)())&screen_reflush;
-    syscall[SYSCALL_GET_TIMEBASE] = (long (*)())&get_time_base;
-    syscall[SYSCALL_GET_TICK] = (long (*)())&get_ticks;
-    syscall[SYSCALL_LOCK_INIT] = (long (*)())&do_mutex_lock_init;
-    syscall[SYSCALL_LOCK_ACQ] = (long (*)())&do_mutex_lock_acquire;
-    syscall[SYSCALL_LOCK_RELEASE] = (long (*)())&do_mutex_lock_release;
-}
-```
-
-#### User-Space System Call Interface (`tiny_libc/syscall.c`):
-*   **`invoke_syscall`:** A low-level function using inline assembly to set up registers (`a7` for syscall number, `a0-a5` for arguments) and execute the `ecall` instruction. It captures the return value from `a0`.
-
-```C
-// In syscall.c
-static long invoke_syscall(long sysno, long arg0, long arg1, long arg2,
-                           long arg3, long arg4)
-{
-    /* TODO: [p2-task3] implement invoke_syscall via inline assembly */
-
-    // Use GCC's register-specific variables to ensure values are in the correct registers.
-    // a7: syscall number
-    // a0-a5: syscall arguments
-    // a0: syscall return value
-    register long a7 asm("a7") = sysno;
-    register long a0 asm("a0") = arg0;
-    register long a1 asm("a1") = arg1;
-    register long a2 asm("a2") = arg2;
-    register long a3 asm("a3") = arg3;
-    register long a4 asm("a4") = arg4;
-    // The function signature only goes up to arg4, so we don't need to handle a5.
-
-    // Execute the 'ecall' instruction.
-    // The output is the return value, which will be in register a0.
-    // The inputs are the syscall number (a7) and arguments (a0-a4).
-    asm volatile(
-        "ecall"
-        : "+r"(a0) // Output: a0 is read/write. It's an input (arg0) and output (return value).
-        : "r"(a1), "r"(a2), "r"(a3), "r"(a4), "r"(a7) // Input registers.
-        : "memory"   // Clobber: Informs the compiler that this instruction may modify memory.
-    );
-
-    return a0;
-}
-```
-
-*   **`sys_*` wrappers:** All user-facing `sys_sleep`, `sys_yield`, `sys_mutex_acquire`, etc., were modified to call `invoke_syscall` instead of the old jump table.
-
-```C
-// In syscall.c
-void sys_yield(void)
-{
-    if (!SYSCALL_IMPLEMENTED) {
-        call_jmptab(YIELD, 0, 0, 0, 0, 0);
-    } else {
-        invoke_syscall(SYSCALL_YIELD, 0, 0, 0, 0, 0);
-    }
-}
-
-void sys_move_cursor(int x, int y)
-{
-    if (!SYSCALL_IMPLEMENTED) {
-        call_jmptab(MOVE_CURSOR, (long)x, (long)y, 0, 0, 0);
-    } else {
-        invoke_syscall(SYSCALL_CURSOR, (long)x, (long)y, 0, 0, 0);
-    }
-}
-
-void sys_write(char *buff)
-{
-    if (!SYSCALL_IMPLEMENTED) {
-        call_jmptab(PRINT, (long)buff, 0, 0, 0, 0);
-    } else {
-        invoke_syscall(SYSCALL_WRITE, (long)buff, 0, 0, 0, 0);
-    }
-}
-
-void sys_reflush(void)
-{
-    /* TODO: [p2-task1] call call_jmptab to implement sys_reflush */
-    if (!SYSCALL_IMPLEMENTED) {
-        call_jmptab(REFLUSH, 0, 0, 0, 0, 0);
-    } else {
-        /* TODO: [p2-task3] call invoke_syscall to implement sys_reflush */
-        invoke_syscall(SYSCALL_REFLUSH, 0, 0, 0, 0, 0);
-    }
-}
-
-int sys_mutex_init(int key)
-{
-    /* TODO: [p2-task2] call call_jmptab to implement sys_mutex_init */
-    if (!SYSCALL_IMPLEMENTED) {
-        return call_jmptab(MUTEX_INIT, (long)key, 0, 0, 0, 0);
-    } else {
-        /* TODO: [p2-task3] call invoke_syscall to implement sys_mutex_init */
-        return invoke_syscall(SYSCALL_LOCK_INIT, (long)key, 0, 0, 0, 0);
-    }
-}
-
-void sys_mutex_acquire(int mutex_idx)
-{
-    /* TODO: [p2-task2] call call_jmptab to implement sys_mutex_acquire */
-    if (!SYSCALL_IMPLEMENTED) {
-        call_jmptab(MUTEX_ACQ, mutex_idx, 0, 0, 0, 0);
-    } else {
-        /* TODO: [p2-task3] call invoke_syscall to implement sys_mutex_acquire */
-        invoke_syscall(SYSCALL_LOCK_ACQ, (long)mutex_idx, 0, 0, 0, 0);
-    }
-}
-
-void sys_mutex_release(int mutex_idx)
-{
-    /* TODO: [p2-task2] call call_jmptab to implement sys_mutex_release */
-    if (!SYSCALL_IMPLEMENTED) {
-        call_jmptab(MUTEX_RELEASE, mutex_idx, 0, 0, 0, 0);
-    } else {
-        /* TODO: [p2-task3] call invoke_syscall to implement sys_mutex_release */
-        invoke_syscall(SYSCALL_LOCK_RELEASE, (long)mutex_idx, 0, 0, 0, 0);
-    }
-}
-
-long sys_get_timebase(void)
-{
-    /* TODO: [p2-task3] call invoke_syscall to implement sys_get_timebase */
-    return invoke_syscall(SYSCALL_GET_TIMEBASE, 0, 0, 0, 0, 0);
-}
-
-long sys_get_tick(void)
-{
-    /* TODO: [p2-task3] call invoke_syscall to implement sys_get_tick */
-    return invoke_syscall(SYSCALL_GET_TICK, 0, 0, 0, 0, 0);
-}
-
-void sys_sleep(uint32_t time)
-{
-    /* TODO: [p2-task3] call invoke_syscall to implement sys_sleep */
-    invoke_syscall(SYSCALL_SLEEP, (long)time, 0, 0, 0, 0);
-}
-```
-
-#### Task Initialization (`sched.c`, `main.c`):
-*   **`init_pcb_stack`:** Modified to create a "fake" exception frame for new tasks, allowing them to start execution in User Mode via the `sret` path. This involved setting `sepc` to the task's entry point, `sstatus` for U-Mode return, and `sp` to the user stack.
-
-```C
-// In main.c
-void init_pcb_stack(
-    ptr_t kernel_stack, ptr_t user_stack, ptr_t entry_point,
-    pcb_t *pcb)
-{
-    /* TODO: [p2-task3] initialization of registers on kernel stack
-     * HINT: sp, ra, sepc, sstatus
-     * NOTE: To run the task in user mode, you should set corresponding bits
-     *     of sstatus(SPP, SPIE, etc.).
-     */
-
-    regs_context_t *pt_regs = (regs_context_t *)(kernel_stack - sizeof(regs_context_t));
-
-    // Initialize all registers to 0
-    for (int i = 0; i < 32; i++) {
-        pt_regs->regs[i] = 0;
-    }
-
-    // Initialize ra and sp
-    pt_regs->regs[1] = 0; // ra
-    pt_regs->regs[2] = user_stack; // sp
-
-    // Initialie `sstatus`, `SPP` field is now 0; `SPIE` field is now 1
-    pt_regs->sstatus = SR_SPIE;
-
-    // Initialize `sepc` to the entry point
-    pt_regs->sepc = entry_point;
-
-    /* TODO: [p2-task1] set sp to simulate just returning from switch_to
-     * NOTE: you should prepare a stack, and push some values to
-     * simulate a callee-saved context.
-     */
-    switchto_context_t *pt_switchto =
-        (switchto_context_t *)((ptr_t)pt_regs - sizeof(switchto_context_t));
-
-    // Set the `ra` (return address) register in our fake context to the task's entry point.
-    pt_switchto->regs[0] = (reg_t)&ret_from_exception; // ra
-
-    // Set the `sp` (stack pointer) for the new task.
-    // The stack pointer should point to the base of our fake context.
-    pt_switchto->regs[1] = (reg_t)pt_switchto; // sp
-
-    // Update the PCB's kernel_sp to point to this fake context.
-    pcb->kernel_sp = (reg_t)pt_switchto;
-    pcb->user_sp = user_stack;
-}
-```
-
-*   **`do_sleep` and `check_sleeping`:** Implemented the logic for tasks to voluntarily block themselves for a specified time and for the scheduler to wake them up when their time expires.
-
-```C
-// In sched.c
-void do_sleep(uint32_t sleep_time)
-{
-    // TODO: [p2-task3] sleep(seconds)
-    // NOTE: you can assume: 1 second = 1 `timebase` ticks
-
-    // 1. block the current_running
-    current_running->status = TASK_BLOCKED;
-    // 2. set the wake up time for the blocked task
-    current_running->wakeup_time = get_timer() + sleep_time;
-    // 3. reschedule because the current_running is blocked.
-    list_add_tail(&current_running->list, &sleep_queue);
-    do_scheduler();
-}
-```
-
-```C
-// In time.c
-void check_sleeping(void)
-{
-    // TODO: [p2-task3] Pick out tasks that should wake up from the sleep queue
-    list_node_t *node, *next_node;
-
-    for (node = sleep_queue.next, next_node = node->next;
-         node != &sleep_queue;
-         node = next_node, next_node = node->next)
-    {
-        pcb_t *task_to_wake = list_entry(node, pcb_t, list);
-
-        if (get_timer() >= task_to_wake->wakeup_time) {
-            do_unblock(node);
-        }
-    }
-}
-```
-
-*   **`cmd_wrq` (in `cmd.c`):** Modified to be the sole entry point for loading tasks, ensuring `process_id` is reset and tasks are loaded into the `pcb` array correctly.
-
-```C
-// In cmd.c
-/**
- * @brief Command handler to write multiple programs into the ready queue.
- *
- * This command initializes PCBs for each specified task and adds them
- * to the ready queue for scheduling.
- *
- * @param args A space-separated string of task names to load into the ready queue.
- * @return Always returns 0.
- */
-int cmd_wrq(char *args) {
-    char parsed_names[MAX_BATCH_TASKS][MAX_NAME_LEN];
-    int num_parsed_tasks;
-
-    // Check for wildcard '*', if so, load all tasks
-    if (args != NULL && strcmp(args, "*") == 0) {
-        num_parsed_tasks = 12;
-        char *all_tasks[] = {"fly", "fly1", "fly2", "fly3", "fly4", "fly5", "lock1", "lock2", "print1", "print2", "sleep", "timer"};
-        for (int i = 0; i < num_parsed_tasks; ++i) {
-            strncpy(parsed_names[i], all_tasks[i], MAX_NAME_LEN);
-        }
-    } else {
-        // Check for empty arguments
-        if (args == NULL || *args == '\0') {
-            bios_putstr(ANSI_FMT("ERROR: Usage: wrq <task_name1> <task_name2> ... or wrq *\n\r", ANSI_BG_RED));
-            return 0;
-        }
-        // Tokenize the input arguments into individual task names
-        num_parsed_tasks = tokenize_string(args, parsed_names, MAX_BATCH_TASKS);
-    }
-
-    if (num_parsed_tasks <= 0) {
-        bios_putstr(ANSI_FMT("ERROR: No tasks provided for demo.", ANSI_BG_RED));
-        bios_putstr(ANSI_FMT("\n\r", ANSI_NONE));
-        return 0;
-    }
-
-    // --- Initialize PCBs and add them to the ready_queue ---
-    list_init(&ready_queue); // the list initialized in main.c shall be invalidated
-    ptr_t next_task_addr = TASK_MEM_BASE;
-    for (int i = 0; i < num_parsed_tasks; ++i) {
-        int task_idx = search_task_name(tasknum, parsed_names[i]);
-        if (task_idx == -1) {
-            bios_putstr(ANSI_FMT("ERROR: Invalid task name in arguments: ", ANSI_BG_RED));
-            bios_putstr(parsed_names[i]);
-            bios_putstr(ANSI_FMT("\n\r", ANSI_NONE));
-            return 0; // Abort
-        }
-
-        // Get a free PCB
-        pcb_t *new_pcb = &pcb[process_id];
-
-        // Load the task into memory
-        ptr_t entry_point = load_task_img(tasks[task_idx].name, tasknum, next_task_addr);
-
-        // Initialize the PCB
-        new_pcb->kernel_sp = allocKernelPage(KERNEL_STACK_PAGES) + KERNEL_STACK_PAGES * PAGE_SIZE;
-        new_pcb->user_sp = allocUserPage(USER_STACK_PAGES) + USER_STACK_PAGES * PAGE_SIZE;
-        new_pcb->pid = process_id++;
-        new_pcb->status = TASK_READY;
-        new_pcb->cursor_x = 0;
-        new_pcb->cursor_y = i; // Give each task its own line
-
-        // Initialize the fake context on the stack
-        init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, new_pcb);
-
-        // Add the initialized PCB to the ready queue
-        list_add_tail(&new_pcb->list, &ready_queue);
-
-        // Update the next available task address, page-aligned
-        next_task_addr += tasks[task_idx].byte_size;
-        next_task_addr = (next_task_addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-    }
-    
-    bios_putstr(ANSI_FMT("Info: Starting scheduler...\n\r", ANSI_FG_GREEN));
-
-    // Enough newlines to clear the screen
-    // (don't know how to utilize screen_clear and screen_reflush API)
-    bios_putstr("\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r");
-    bios_putstr("\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r");
-    bios_putstr("\n\r\n\r\n\r");
-    screen_clear();
-    screen_reflush();
-
-    // --- do_scheduler takes over control ---
-    while (1) {
-        do_scheduler();
-    }
-
-    return 0;
-}
-```
-
-### Key Debugging Challenges & Learnings:
-
-*   **`tp` Register Management:** Understanding that `tp` (thread pointer) is special. It must be correctly set to `current_running` upon entering the kernel from a trap, and maintained across context switches (`switch_to`), but not saved/restored as part of the user's general-purpose registers in the exception frame.
-
-```nasm
-// In entry.S
-.macro SAVE_CONTEXT
-  /* TODO: [p2-task3] save all general purpose registers here! */
-  /* HINT: Pay attention to the function of tp and sp, and save them carefully! */
-
-  # Resume kernel sp from sscratch
-  csrrw sp, sscratch, sp
-
-  # Decrease the stack pointer to allocate space for the context
-  addi sp, sp, -OFFSET_SIZE
-
-  # Store general-purpose registers
-  sd ra, OFFSET_REG_RA(sp)
-  // sd sp, OFFSET_REG_SP(sp) (Now we store sp last)
-  sd gp, OFFSET_REG_GP(sp)
-  // sd tp, OFFSET_REG_TP(sp) <-- SHOULD NOT STORE THIS
-  ......
-  
-// In RESTORE_CONTEXT
-.macro RESTORE_CONTEXT
-  /* TODO: Restore all general purpose registers and sepc, sstatus */
-  /* HINT: Pay attention to sp again! */
-
-  # Restore CSRs from the stack frame.
-  ld t0, OFFSET_REG_SSTATUS(sp)
-  csrw sstatus, t0
-  ld t0, OFFSET_REG_SEPC(sp)
-  csrw sepc, t0
-  ld t0, OFFSET_REG_SBADADDR(sp)
-  csrw stval, t0
-  ld t0, OFFSET_REG_SCAUSE(sp)
-  csrw scause, t0
-
-  # Prepare for the final atomic swap by loading the user's
-  # stack pointer into the sscratch register.
-  ld t0, OFFSET_REG_SP(sp)
-  csrw sscratch, t0
-
-  # Load all general-purpose registers from the stack frame.
-  # Note: sp (x2) is NOT restored here. It will be restored atomically later.
-  ld ra, OFFSET_REG_RA(sp)
-  ld gp, OFFSET_REG_GP(sp)
-  // ld tp, OFFSET_REG_TP(sp) <-- SHOULD NOT RESUME THIS ONE
-```
-
-*   **PCB Array Overflow (10+ hours debugging this one):** called `pcb_init()` in both `main.c` and `cmd.c`, caused the PCB to overflow, resulting in the following error message:
-
-```
-exception code: 2 , Illegal instruction , epc 50544e74 , ra 50203508
-  ### ERROR ### Please RESET the board ###
-```
-
-Modified `init_pcb()` function:
-
-```C
-// leave the init work to cmd_wrq
-static void init_pcb(void)
-{
-    // /* TODO: [p2-task1] load needed tasks and init their corresponding PCB */
-    // ptr_t next_task_addr = TASK_MEM_BASE;
-    // tasknum = *(short *)TASK_NUM_LOC; // Ensure tasknum is loaded
-
-    // for (int i = 0; i < tasknum; i++) {
-    //     // Load the task into memory at the next available address
-    //     ptr_t entry_point = load_task_img(tasks[i].name, tasknum, next_task_addr);
+---
+
+### Step 5: Initialization Sequence (`init/main.c`)
+The boot process requires synchronization. Hart 0 (Main) must initialize the system (memory, tasks) before Hart 1 (Secondary) tries to schedule tasks.
+
+**Implementation Logic:**
+1.  **Hart 0:**
+    *   Init SMP (BKL).
+    *   Acquire BKL.
+    *   Init Task Info, PCBs, Locks, Syscalls.
+    *   Send IPI (`wakeup_other_hart`) to wake Hart 1.
+    *   **Wait** until Hart 1 signals it has booted (`core1_booted` flag).
+    *   Release BKL and enter the shell loop.
+2.  **Hart 1:**
+    *   Wait for BKL (it will spin here until Hart 0 releases it or explicitly waits).
+    *   Set `core1_booted = 1` to signal Hart 0.
+    *   Setup Exception Vector (`setup_exception`).
+    *   Enable Interrupts.
+    *   Release BKL (temporarily, logical flow implies it enters the idle loop which usually manages locks via the trap handler).
+
+**Code Changes (`init/main.c`):**
+```c
+volatile int core1_booted = 0;
+
+int main(void) {
+    int core_id = get_current_cpu_id();
+
+    if (core_id == 0) {
+        smp_init();
+        lock_kernel(); // Hold lock during init
+
+        init_task_info();
+        init_pcb(); // Sets up cpu_table[0] and [1] default PCBs
+        // ... other inits ...
+
+        wakeup_other_hart(); // Send IPI
+        unlock_kernel();     // Briefly unlock to let Core 1 proceed? 
+                             // (Actually, usually Core 0 spins on core1_booted 
+                             //  while checking/releasing lock logic, but here:)
         
-    //     // Get a free PCB
-    //     pcb_t *new_pcb = &pcb[process_id];
-
-    //     // Initialize the PCB
-    //     new_pcb->kernel_sp = allocKernelPage(KERNEL_STACK_PAGES) + KERNEL_STACK_PAGES * PAGE_SIZE;
-    //     new_pcb->user_sp = allocUserPage(USER_STACK_PAGES) + USER_STACK_PAGES * PAGE_SIZE;
-    //     new_pcb->pid = process_id++;
-    //     new_pcb->status = TASK_READY;
-    //     new_pcb->cursor_x = 0;
-    //     new_pcb->cursor_y = i; // Give each task its own line to start
-
-    //     // Initialize the stack for the first run
-    //     init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, new_pcb);
-
-    //     // Add the PCB to the ready queue
-    //     list_add_tail(&new_pcb->list, &ready_queue);
-
-    //     // Update the next available task address, page-aligned
-    //     next_task_addr += tasks[i].byte_size;
-    //     next_task_addr = (next_task_addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-    // }
-
-    /* TODO: [p2-task1] remember to initialize 'current_running' */
-    current_running = &pid0_pcb;
-}
-```
-
-*   **Linked List Corruption:** Identifying a "double-delete" bug in `check_sleeping` (calling `list_del` twice on the same node) that led to Store/AMO access fault due to corrupted list pointers.
-
-```C
-// In sched.c
-void check_sleeping(void)
-{
-    // TODO: [p2-task3] Pick out tasks that should wake up from the sleep queue
-    list_node_t *node, *next_node;
-
-    for (node = sleep_queue.next, next_node = node->next;
-         node != &sleep_queue;
-         node = next_node, next_node = node->next)
-    {
-        pcb_t *task_to_wake = list_entry(node, pcb_t, list);
-
-        if (get_timer() >= task_to_wake->wakeup_time) {
-	        // list_del(node); <--- DOUBLE FREED `node`
-            do_unblock(node);  <--- DOUBLE FREED `node`
+        // Wait for Core 1 to finish its local init
+        if (CONFIG_ENABLE_MULTICORE) {
+            while (!core1_booted) { /* spin */ }
         }
-    }
-}
-
-```
-
-*   **Debugging Tools:** Extensive use of GDB (breakpoints, `n`, `si`, `p`, `x`, `watch`) and custom `dbprint` macros to trace execution flow, inspect registers, and pinpoint memory corruption.
-
-```C
-// In newly created include/os/dbprint.h
-#ifndef __DB_PRINT_H__
-#define __DB_PRINT_H__
-
-#include <printk.h>
-#include <os/string.h>
-
-// Master switch for debug prints
-#define DEBUG_EN 0
-
-// ANSI color codes
-#define ANSI_COLOR_MAGENTA ""
-#define ANSI_COLOR_RESET   ""
-
-// The debug print macro
-#if DEBUG_EN
-    #define dbprint(fmt, ...) \
-        do { \
-            printk("[DEBUG] ", ##__VA_ARGS__); \
-        } while (0)
-#else
-    #define dbprint(fmt, ...) 
-#endif
-
-#endif // __DB_PRINT_H__
-```
-
-## Task 4
-
-### Understanding the Big Picture
-
-#### **The Full Execution Flow of a Timer Interrupt**
-
-This flow assumes the kernel has already been initialized and the twrq command has been run. A user task (e.g., fly) is currently executing in User Mode.
-
-**Phase 1: The Interrupt (Hardware Action)**
-
-1.  **Timer Expires**: The CPU's internal `mtime` register becomes greater than or equal to the `mtimecmp` register (which was set by a previous `bios_set_timer` call).
-2.  **Trap is Triggered**: A hardware timer interrupt is generated.
-3.  **CPU State Change (Atomic Hardware Sequence)**:
-    *   The CPU automatically switches from User Mode to Supervisor Mode.
-    *   It disables global interrupts by clearing the `SIE` bit in the `sstatus` register. The previous value of `SIE` is saved into the `SPIE` bit.
-    *   The address of the interrupted instruction in the `fly` task is saved into the `sepc` (Supervisor Exception PC) register.
-    *   The `scause` register is set to `0x8000000000000005`, indicating an interrupt (most significant bit is 1) of type "supervisor timer interrupt" (code 5).
-    *   The CPU jumps to the address stored in the `stvec` CSR, which you have set to `exception_handler_entry`.
-
-**Phase 2: Kernel Trap Entry (Assembly)**
-
-4.  **`exception_handler_entry` (`entry.S`)**:
-    *   The first instruction, `csrrw sp, sscratch, sp`, executes. It atomically swaps the user task's stack pointer (currently in `sp`) with the kernel stack pointer for this task (which was primed in `sscratch` before the last `sret`). The CPU is now safely operating on the kernel stack.
-    *   The `SAVE_CONTEXT` macro runs, pushing all of the `fly` task's general-purpose registers onto this kernel stack, creating a complete `regs_context_t` frame.
-    *   The address of `ret_from_exception` is loaded into the `ra` register. This is crucial for the return path.
-    *   The arguments for the C handler are prepared: `a0` gets the pointer to the saved context (`sp`), `a1` gets `stval`, and `a2` gets `scause`.
-    *   `jalr x0, t0, 0` is executed, jumping to the `interrupt_helper` function in C.
-
-**Phase 3: C-Level Interrupt Handling**
-
-5.  **`interrupt_helper` (`irq.c`)**:
-    *   It inspects `scause` (`0x8000000000000005`).
-    *   It sees the interrupt bit is set, so it uses the `irq_table`.
-    *   It extracts the exception code (5) and calls `irq_table[5]`, which points to `handle_irq_timer`.
-
-6.  **`handle_irq_timer` (`irq.c`)**:
-    *   **Resets the Timer**: It immediately calls `bios_set_timer(get_ticks() + TIMER_INTERVAL)`. This "re-arms" the timer, ensuring another interrupt will happen in the future. This is the most critical step to prevent an interrupt storm.
-    *   **Invokes the Scheduler**: It calls `do_scheduler()`. This is the act of preemption.
-
-7.  **`do_scheduler` (`sched.c`)**:
-    *   It calls `check_sleeping()` to wake up any tasks from the `sleep_queue`.
-    *   It gets the `current_running` PCB (which is `fly`'s PCB).
-    *   It sees `fly`'s status is `TASK_RUNNING`, so it changes it to `TASK_READY` and adds it to the end of the `ready_queue`.
-    *   It dequeues the next task from the front of the `ready_queue` (e.g., `print1`'s PCB).
-    *   It updates the global `current_running` pointer to point to `print1`'s PCB.
-    *   It calls `switch_to(fly_pcb, print1_pcb)`.
-
-**Phase 4: Context Switch and Return (Assembly)**
-
-8.  **`switch_to` (`entry.S`)**:
-    *   Saves the callee-saved registers (kernel context) of the outgoing task (`fly`) onto its kernel stack.
-    *   Loads the kernel stack pointer (`sp`) of the incoming task (`print1`) from its PCB.
-    *   Sets the `tp` register to point to the incoming task's PCB (`print1_pcb`).
-    *   Restores the callee-saved registers of the incoming task (`print1`).
-    *   Executes `jr ra`, which jumps to the `ra` that was saved on `print1`'s stack. Since `print1` was previously in the ready queue, its `ra` points to `ret_from_exception`.
-
-9.  **`ret_from_exception` (`entry.S`)**:
-    *   The CPU is now executing in the context of the new task (`print1`), on `print1`'s kernel stack.
-    *   The `RESTORE_CONTEXT` macro runs, loading `print1`'s saved user registers from its exception frame.
-    *   `sret` is executed.
-
-**Phase 5: Resuming a New Task (Hardware Action)**
-
-10. **`sret` Hardware Magic**:
-    *   The CPU restores the state from the (now `print1`'s) CSRs.
-    *   It jumps to the address in `print1`'s `sepc`.
-    *   It switches back to User Mode.
-    *   It re-enables interrupts (`sstatus.SIE` is restored from `SPIE`).
-
-### Key Concepts Implemented & Explored:
-
-*   **Preemption vs. Cooperation**: Understanding the fundamental difference between a scheduler that relies on tasks to voluntarily yield (cooperative) and one that uses hardware interrupts to enforce time slices (preemptive).
-*   **Asynchronous Traps**: Learning to handle interrupts that can occur at any time, which introduces new challenges related to concurrency and system state consistency.
-*   **RISC-V Timer Interrupts**: Interacting with the RISC-V timer mechanism, including setting timers and handling the specific trap associated with them.
-*   **Interrupt Configuration (CSRs)**: Correctly configuring the `sie` (Supervisor Interrupt Enable) and `sstatus` (Supervisor Status) registers to enable timer interrupts at both the specific (timer) and global (supervisor) levels.
-*   **Idle State (`wfi`)**: Using the "Wait For Interrupt" instruction to create an efficient idle loop for the kernel, allowing the CPU to enter a low-power state when no tasks are ready to run, instead of busy-waiting.
-
-### Implementation Details:
-
-*   **Interrupt Controller Setup (`trap.S`)**:
-    *   Modified `setup_exception` to enable supervisor-level timer interrupts system-wide by setting the `SIE_STIE` bit (bit 5) in the `sie` CSR. This was done once at kernel initialization.
-
-```nasm
-// In trap.S
-ENTRY(setup_exception)
-
-  /* TODO: [p2-task3] save exception_handler_entry into STVEC */
-  la t0, exception_handler_entry
-  csrw stvec, t0
-
-  /* TODO: [p2-task4] enable interrupts globally */
-
-  // Global interrupt will be handled in `cmd_twrq`
-  // Enable Supervisor Timer Interrupts
-  li t0, SIE_STIE
-  csrs sie, t0
-
-ENDPROC(setup_exception)
-```
-
-*   **Timer Interrupt Handler (`irq.c`)**:
-    *   **Registration**: In `init_exception`, the `irq_table` was populated to map the timer interrupt code (`IRQC_S_TIMER`) to our new C-level handler, `handle_irq_timer`.
-    *   **Implementation**: The `handle_irq_timer` function was created to perform the two essential actions of a preemptive tick:
-        1.  **Reset the Timer**: It immediately sets the next timer interrupt by calling `bios_set_timer(get_ticks() + TIMER_INTERVAL)`. This is crucial to prevent an "interrupt storm".
-        2.  **Invoke the Scheduler**: It calls `do_scheduler()` to preempt the currently running task and select a new one to run.
-
-	```C
-	// In irq.c
-	void handle_irq_timer(regs_context_t *regs, uint64_t stval, uint64_t scause)
-	{
-	    // TODO: [p2-task4] clock interrupt handler.
-	    // Note: use bios_set_timer to reset the timer and remember to reschedule
-	    bios_set_timer(get_ticks() + TIMER_INTERVAL);
-	    do_scheduler();
-	}
-
-	void init_exception()
-	{
-	    /* TODO: [p2-task3] initialize exc_table */
-	    /* NOTE: handle_syscall, handle_other, etc.*/
-	    exc_table[EXCC_SYSCALL] = (handler_t)&handle_syscall;
-
-	    /* TODO: [p2-task4] initialize irq_table */
-	    /* NOTE: handle_int, handle_other, etc.*/
-	    irq_table[IRQC_S_TIMER] = (handler_t)&handle_irq_timer;
-
-	    /* TODO: [p2-task3] set up the entrypoint of exceptions */
-	    setup_exception();
-	}
-```
-
-*   **Preemptive Scheduler Activation (`cmd.c`)**:
-    *   A new command, `twrq`, was created to act as the entry point for preemptive mode.
-    *   The `twrq` handler first loads all specified user tasks into the `ready_queue` (same as `wrq`).
-    *   It then kicks off the entire preemption process by:
-        1.  Setting the very first timer interrupt.
-        2.  Enabling global interrupts via the `enable_interrupt()` function. This was the final step before idling, ensuring the kernel was fully ready.
-        3.  Entering an infinite `while(1) { asm volatile("wfi"); }` loop, making the main kernel thread an efficient, interrupt-driven idle task.
-*   **Test Program Modification**:
-    *   To prove true preemption, all `sys_yield()` calls were commented out of the user test programs (`fly`, `print1`, `lock1`, etc.). This ensured that context switches were driven exclusively by the timer interrupt, not by voluntary task cooperation.
-
-
-	 ```C
-    // In cmd.c
-    /**
-     * @brief Command handler to write multiple programs into the ready queue and enabling timer interrupt.
-     *
-     * This command initializes PCBs for each specified task and adds them
-     * to the ready queue for scheduling.
-     *
-     * @param args A space-separated string of task names to load into the ready queue.
-     * @return Always returns 0.
-     */
-    int cmd_twrq(char *args) {
-        char parsed_names[MAX_BATCH_TASKS][MAX_NAME_LEN];
-        int num_parsed_tasks;
-    
-        // Check for wildcard '*', if so, load all tasks
-        if (args != NULL && strcmp(args, "*") == 0) {
-            num_parsed_tasks = 12;
-            char *all_tasks[] = {"fly", "fly1", "fly2", "fly3", "fly4", "fly5", "lock1", "lock2", "print1", "print2", "sleep", "timer"};
-            for (int i = 0; i < num_parsed_tasks; ++i) {
-                strncpy(parsed_names[i], all_tasks[i], MAX_NAME_LEN);
-            }
-        } else {
-            // Check for empty arguments
-            if (args == NULL || *args == '\0') {
-                bios_putstr(ANSI_FMT("ERROR: Usage: twrq <task_name1> <task_name2> ... or twrq *\n\r", ANSI_BG_RED));
-                return 0;
-            }
-            // Tokenize the input arguments into individual task names
-            num_parsed_tasks = tokenize_string(args, parsed_names, MAX_BATCH_TASKS);
-        }
-    
-        if (num_parsed_tasks <= 0) {
-            bios_putstr(ANSI_FMT("ERROR: No tasks provided for demo.", ANSI_BG_RED));
-            bios_putstr(ANSI_FMT("\n\r", ANSI_NONE));
-            return 0;
-        }
-    
-        // --- Initialize PCBs and add them to the ready_queue ---
-        list_init(&ready_queue); // the list initialized in main.c shall be invalidated
-        ptr_t next_task_addr = TASK_MEM_BASE;
-        for (int i = 0; i < num_parsed_tasks; ++i) {
-            int task_idx = search_task_name(tasknum, parsed_names[i]);
-            if (task_idx == -1) {
-                bios_putstr(ANSI_FMT("ERROR: Invalid task name in arguments: ", ANSI_BG_RED));
-                bios_putstr(parsed_names[i]);
-                bios_putstr(ANSI_FMT("\n\r", ANSI_NONE));
-                return 0; // Abort
-            }
-    
-            // Get a free PCB
-            pcb_t *new_pcb = &pcb[process_id];
-    
-            // Load the task into memory
-            ptr_t entry_point = load_task_img(tasks[task_idx].name, tasknum, next_task_addr);
-    
-            // Initialize the PCB
-            new_pcb->kernel_sp = allocKernelPage(KERNEL_STACK_PAGES) + KERNEL_STACK_PAGES * PAGE_SIZE;
-            new_pcb->user_sp = allocUserPage(USER_STACK_PAGES) + USER_STACK_PAGES * PAGE_SIZE;
-            new_pcb->pid = process_id++;
-            new_pcb->status = TASK_READY;
-            new_pcb->cursor_x = 0;
-            new_pcb->cursor_y = i; // Give each task its own line
-    
-            // Initialize the fake context on the stack
-            init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, new_pcb);
-    
-            // Add the initialized PCB to the ready queue
-            list_add_tail(&new_pcb->list, &ready_queue);
-    
-            // Update the next available task address, page-aligned
-            next_task_addr += tasks[task_idx].byte_size;
-            next_task_addr = (next_task_addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-        }
-    
-        bios_putstr(ANSI_FMT("Info: Starting scheduler...\n\r", ANSI_FG_GREEN));
-    
-        // Enough newlines to clear the screen
-        // (don't know how to utilize screen_clear and screen_reflush API)
-        bios_putstr("\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r");
-        bios_putstr("\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r");
-        bios_putstr("\n\r\n\r\n\r");
-        screen_clear();
-        screen_reflush();
-    
-        // Set the FIRST interrupt to kick things off
+        
+        lock_kernel(); // Re-acquire to print logo/start shell safely
+        // ... Start Shell ...
+    } else {
+        // Core 1
+        lock_kernel();   // Wait for Core 0 to finish global init
+        core1_booted = 1; // Signal we are alive
+        
+        setup_exception(); // Set stvec
         bios_set_timer(get_ticks() + TIMER_INTERVAL);
-    
-        // Enable global interrupt here
         enable_interrupt();
-    
-        // --- Interrupt driven idle loop ---
-        while (1) {
-            enable_preempt();
-            asm volatile("wfi");
-        }
-    
-        return 0;
+        
+        unlock_kernel();
     }
-```
-
-### 4. Key Debugging Challenges & Learnings:
-
-*   **The "Interrupt Storm" Bug**: The initial implementation of `handle_irq_timer` used `bios_set_timer(TIMER_INTERVAL)`, which set an absolute (and long-passed) time, causing an infinite cascade of interrupts and an immediate stack overflow. This was fixed by setting the timer relative to the current time: `get_ticks() + TIMER_INTERVAL`.
-*   **The S-Mode Trap & `sscratch` Initialization**: The most critical bug was a Store/AMO access fault on the very first timer interrupt. Through methodical GDB debugging, we discovered:
-    *   The first interrupt was an S-Mode to S-Mode trap (from the `wfi` idle loop).
-    *   The `exception_handler_entry` unconditionally tried to swap stacks using `sscratch`, but `sscratch` had never been initialized for the idle task (`pid0_pcb`).
-    *   This loaded a garbage value into `sp`, causing the handler to crash on its first attempt to write to the stack.
-    *   **Solution**: We fixed this by priming `sscratch` with the idle task's stack pointer (`pid0_stack`) in `main.c` before any interrupts were enabled. This made the first S-Mode trap safe.
-*   **Systematic Debugging**: This task reinforced the importance of a systematic debugging process: analyzing error codes, forming a hypothesis (stack overflow), using tools to gather evidence (GDB, `printl`), identifying contradictions, and refining the hypothesis until the true root cause was found.
-
-### 5. Final Result
-
-The kernel now supports a fully preemptive, time-sliced multitasking scheduler. User programs run concurrently and are switched automatically by the hardware timer interrupt, creating a more robust and modern operating system architecture. The `twrq` command provides a clean entry point to this new execution mode.
-
-## Project 2, Task 5: Complex Scheduling Algorithm
-
-### 1. Objective
-
-The goal of this task was to implement a complex, dynamic scheduling algorithm capable of managing multiple processes with varying execution speeds. The scheduler needed to ensure that all processes could synchronize their progress at predefined checkpoints and at the end of a full run, all while maintaining the visual effect of continuous movement (i.e., no process should appear to completely stop). This required moving beyond a simple round-robin or static priority scheduler to one that could intelligently allocate CPU time based on the real-time progress of each task.
-
-### 2. Key Concepts & Challenges
-
-To solve this, a lap-aware, proportional timeslice scheduling algorithm was developed. This approach addresses several key challenges:
-
-*   **Proportional Timeslicing**: The core concept is to give more CPU time to tasks that are further behind. Instead of a fixed timeslice for every task, the duration of a task's run is made proportional to its `remaining_workload`.
-*   **Checkpoint Synchronization**: A "soft barrier" mechanism was needed. When a fast task reaches a checkpoint, it must be throttled to allow slower tasks to catch up, without being completely blocked.
-*   **Lap Synchronization**: A similar barrier was required at the end of a run. When a task finishes a lap and loops back, it must wait for all other tasks to finish the current lap before it begins the next one. This prevents it from unfairly getting a head start on the next lap.
-*   **Heuristic-Based State Tracking**: Since the kernel cannot know the internal state of a user program, it must infer state changes (like starting a new lap) by observing the data provided by the task, specifically the `remaining_workload`.
-
-### 3. Implementation Details
-
-The implementation was achieved through coordinated changes in the PCB structure, the scheduler, the system call handler, and the interrupt handler.
-
-#### a. PCB Modification (`include/os/sched.h`)
-
-To track progress across multiple runs, a new field was added to the Process Control Block:
-*   `int lap_count;`: This integer is initialized to 0 and tracks how many full laps a task has completed.
-
-#### b. Lap Detection (`kernel/sched/sched.c`)
-
-The kernel automatically detects when a task starts a new lap by using a heuristic within the `do_set_sche_workload` system call handler.
-*   When a task's workload suddenly jumps from a low value (near the end of a lap) to a high value (at the start of a new one), the kernel increments that task's `lap_count`.
-
-```c
-void do_set_sche_workload(int workload)
-{
-    // New lap detection
-    if (workload > current_running->remaining_workload + 60) {
-        current_running->lap_count++;
+    
+    while (1) {
+        enable_preempt();
+        asm volatile("wfi");
     }
-    current_running->remaining_workload = workload;
 }
 ```
 
-#### c. Timer and Scheduler Refactoring (`irq.c` & `sched.c`)
+---
 
-To enable dynamic timeslices, control of the timer was moved from the interrupt handler to the scheduler.
-*   In `handle_irq_timer`: The static call to `bios_set_timer()` was made conditional, so it is skipped when `CONFIG_TIMESLICE_FINETUNING` is active.
+### Step 6: Scheduler Update (`kernel/sched/sched.c`)
+The scheduler must now consider CPU affinity (Task 4 prep) and ensure it only picks tasks valid for the current core.
 
-```c
-// In irq.c
-void handle_irq_timer(regs_context_t *regs, uint64_t stval, uint64_t scause)
-{
-    // TODO: [p2-task4] clock interrupt handler.
-    // Note: use bios_set_timer to reset the timer and remember to reschedule
-    if (!CONFIG_TIMESLICE_FINETUNING) {
-        bios_set_timer(get_ticks() + TIMER_INTERVAL);
-    }
-    do_scheduler();
-}
-```
-
-*   In `do_scheduler`: The call to `bios_set_timer()` was added after the next task to run has been chosen, allowing a custom timeslice to be set for that specific task.
+**Implementation Logic:**
+1.  Get `core_id`.
+2.  Iterate ready queue.
+3.  Check `task->cpu_mask`. If the bit corresponding to `core_id` is not set, skip the task.
+4.  Update `on_cpu` field for `ps` display.
 
 ```c
-// Updated do_scheduler logic
-// Focus on the `CONFIG_TIMESLICE_FINETUNING` related logic
-// `DYNAMIC_PRIORITIZING` and `WORKLOAD_PRIORITIZING` cannot 
-// satisfy the requirement of task 5
 void do_scheduler(void)
 {
-    // TODO: [p2-task3] Check sleep queue to wake up PCBs
-    check_sleeping();
+    uint64_t core_id = get_current_cpu_id();
+    uint64_t core_mask = 1 << core_id;
+    
+    // ...
+    
+    // Inside loop:
+    if ((task->cpu_mask & core_mask) == 0)
+        continue; // This task is bound to the other core
+    
+    // ... Found task ...
+    
+    // Update Per-Core pointer
+    SET_CURRENT_RUNNING(next_running);
+    
+    // Record which CPU it is on
+    next_running->on_cpu = core_id;
+    
+    switch_to(prev_running, CURRENT_RUNNING);
+}
+```
 
-    /************************************************************/
-    /* Do not touch this comment. Reserved for future projects. */
-    /************************************************************/
+---
 
-    // [p2-task1] Modify the current_running pointer.
-    pcb_t *prev_running = current_running;
-    pcb_t *next_running;
+## 3. Verification Results
+1.  **Startup:** The OS prints "Core 0 activated" and "Core 1 activated".
+2.  **Concurrent Execution:** Running `exec multicore` executes the `multicore.c` test.
+    *   **Single Core Phase:** It runs a calculation on one core.
+    *   **Multi Core Phase:** It splits the calculation range in half. Core 0 handles 0-50%, Core 1 handles 50-100%.
+    *   **Result:** The multi-core phase finishes significantly faster (approx 1.8x speedup) than the single-core phase, proving parallel execution.
 
-    if (prev_running->status == TASK_RUNNING) {
-        prev_running->status = TASK_READY;
-        list_add_tail(&prev_running->list, &ready_queue);
-    }
+Here is the updated section for **Task 3**. I have integrated your classmate's insight regarding the "Fake Switch Context" and the tricky nature of locking during context switches into the documentation.
+
+I have adapted the terminology to match your codebase (e.g., using `lock_kernel` instead of `lock_pcb` and `ret_from_exception` instead of `ret_from_trap`).
+
+
+***
+
+### DEBUG. The Big Kernel Lock & Context Switching (Critical Implementation Details)
+
+One of the most challenging aspects of SMP implementation is managing the Big Kernel Lock (BKL) during context switches. If not handled correctly, the system will deadlock or crash with random instruction faults that are nearly impossible to trace via GDB.
+
+#### 1. The Asymmetry of Locking
+In `do_scheduler()`, the code looks like this:
+
+```c
+// Process A is running
+lock_kernel();       // A acquires lock
+switch_to(prev, next); 
+// Process A is suspended...
+// ... TIME PASSES ...
+// Process A is resumed (switched back to)
+unlock_kernel();     // A releases lock
+```
+
+While `lock_kernel()` and `unlock_kernel()` appear paired syntactically, **they are executed by different processes in the timeline**.
+1.  **Process A** acquires the lock and calls `switch_to`.
+2.  Context switches to **Process B**.
+3.  **Process B** returns from its own call to `switch_to`.
+4.  **Process B** executes `unlock_kernel()`.
+
+Therefore, the lock acquired by A is actually released by B. This asymmetry is fundamental to the design.
+
+#### 2. The "New Process" Deadlock
+A critical edge case occurs when switching to a **newly created process** for the first time.
+
+In Project 2, we initialized the stack of a new PCB such that its "fake" context had a return address (`ra`) pointing directly to `ret_from_exception`.
+*   **The Problem:** If Process A switches to New Process B, the CPU restores B's context and jumps straight to `ret_from_exception`. **It completely skips the `unlock_kernel()` call** that normally follows `switch_to`.
+*   **The Result:** The BKL remains held. When any core tries to acquire the lock later, the system deadlocks.
+
+We cannot simply add `unlock_kernel` inside `ret_from_exception` because that entry point is used for *all* trap returns (syscalls, timer interrupts), many of which might not hold the lock, leading to erroneous releases.
+
+#### 3. The Solution: `fake_switch_to_context`
+To solve this, we implemented a specific assembly wrapper in `arch/riscv/kernel/entry.S`. This wrapper mimics the behavior of returning from `switch_to` by manually unlocking the kernel before entering the standard exception return path.
+
+**Implementation in `entry.S`:**
+```asm
+ENTRY(fake_switch_to_context)
+  call unlock_kernel        // Manually release the BKL held by the previous task
+  la ra, ret_from_exception // Set destination
+  jr ra                     // Jump to exception return
+ENDPROC(fake_switch_to_context)
+```
+
+**Modification in `init_pcb_stack` (`kernel/sched/sched.c`):**
+We modified the PCB initialization to point the `ra` register of the switch context to this new wrapper instead of `ret_from_exception`.
+
+```c
+// In init_pcb_stack:
+switchto_context_t *pt_switchto = (switchto_context_t *)((ptr_t)pt_regs - sizeof(switchto_context_t));
+
+// OLD: pt_switchto->regs[0] = (reg_t)&ret_from_exception;
+// NEW: Point to the wrapper that unlocks the kernel
+pt_switchto->regs[0] = (reg_t)&fake_switch_to_context; 
+```
+
+This ensures that even the very first time a process runs, it participates in the BKL protocol correctly: receiving the lock from the previous task and releasing it before entering user space.
+
+---
+# Project 3 Task 4: CPU Affinity (`taskset`) Implementation Document
+
+## 1. Overview
+In a multicore operating system, **CPU Affinity** allows a user to pin a specific process to a specific CPU core (or a set of cores). This is crucial for performance optimization (maximizing cache hits) and isolation (dedicating a core to high-priority tasks).
+
+In Task 4, we implement the `taskset` command and the underlying kernel mechanisms to restrict process execution based on a bitmask.
+*   **Mask:** A bitmask where Bit 0 represents Core 0 and Bit 1 represents Core 1.
+    *   `0x1`: Run only on Core 0.
+    *   `0x2`: Run only on Core 1.
+    *   `0x3`: Allowed on both cores.
+
+## 2. Implementation Steps
+
+### Step 1: Modifying the PCB (`include/os/sched.h`)
+We added fields to the Process Control Block to store affinity information.
+
+*   **`cpu_mask`**: The "permission slip". If bit `n` is set, the process is allowed to run on Core `n`.
+*   **`on_cpu`**: A diagnostic field to track which core is *currently* executing the task (useful for the `ps` command).
+
+```c
+typedef struct pcb
+{
+    // ... existing fields ...
+
+    /* CPU info */
+    uint64_t cpu_mask; // A bitmap of allowed CPUs
+    int on_cpu;        // Which CPU the task is running on
+
+    // ... existing fields ...
+} pcb_t;
+```
+
+### Step 2: Enforcing Affinity in the Scheduler (`kernel/sched/sched.c`)
+The scheduler is the gatekeeper. When `do_scheduler` iterates through the `ready_queue` to pick the next task, it must now check if the candidate task is allowed to run on the current hardware core.
+
+**Implementation Logic:**
+1.  Determine current Core ID (`0` or `1`).
+2.  Create a bitmask for the current core (`1 << core_id`).
+3.  Inside the scheduling loop, perform a bitwise AND between the task's `cpu_mask` and the current core's mask.
+4.  If the result is 0, the task is forbidden on this core; skip it.
+
+```c
+void do_scheduler(void)
+{
+    // 1. Identify the current core
+    uint64_t core_id = get_current_cpu_id();
+    uint64_t core_mask = 1 << core_id;
+
+    // ... standard scheduler setup ...
 
 #if PRIORITY_SCHEDULING == 1
-    // --- Task 5: Priority Scheduling Logic ---
-    if (list_is_empty(&ready_queue)) {
-        next_running = &pid0_pcb;
-    } else {
-        // 1. Find the task with the highest workload
-        list_node_t *current_node;
-        pcb_t *highest_priority_task = NULL;
+    // ...
+    for (current_node = ready_queue.next; current_node != &ready_queue;
+         current_node = current_node->next) {
+        pcb_t *task = list_entry(current_node, pcb_t, list);
 
-        // Dynamic prioritizing logic
-        int max_dynamic_priority = -1;
-        int task_dynamic_priority;
+        // --- AFFINITY CHECK ---
+        // Skip if the task is not allowed on this specific core
+        if ((task->cpu_mask & core_mask) == 0)
+            continue; 
 
-        //Static remaining_workload logic
-        int max_remaining_workload = -1;
-        int min_remaining_workload = 100;
-        pcb_t *highest_workload_task = NULL;
-        pcb_t *lowest_workload_task = NULL;
-
-        // Lapcount awareness
-        int min_lap_count = 100000;
-        pcb_t *lowest_lapcount_task = NULL;
-
-
-        for (current_node = ready_queue.next; current_node != &ready_queue;
-             current_node = current_node->next) {
-            pcb_t *task = list_entry(current_node, pcb_t, list);
-
-            // Calculate task_dynamic_priority
-            task_dynamic_priority = task->remaining_workload + (get_ticks() - task->last_run_time) * AGING_FACTOR;
-
-            // Identify the task with the highest priority
-            if (task_dynamic_priority > max_dynamic_priority) {
-                max_dynamic_priority = task_dynamic_priority;
-                highest_priority_task = task;
-            }
-
-            // Identify the task with the highest workload
-            if (task->remaining_workload > max_remaining_workload) {
-                max_remaining_workload = task->remaining_workload;
-                highest_workload_task = task;
-            }
-
-            // Identify the task with the lowest workload
-            if (task->remaining_workload < min_remaining_workload) {
-                min_remaining_workload = task->remaining_workload;
-                lowest_workload_task = task;
-            }
-
-            // Identify the task with the min lap_count
-            if (task->lap_count < min_lap_count) {
-                min_lap_count = task->lap_count;
-                lowest_lapcount_task = task;
-            }
-
-        }
-
-        // Next running selection logic
-        if (CONFIG_DYNAMIC_PRIORITIZING) {
-            // Select highest_priority_task
-            next_running = highest_priority_task;
-        } else if (CONFIG_WORKLOAD_PRIORITIZING) {
-            // Select next_running based on remianing workload
-            if (max_remaining_workload - min_remaining_workload > 30) {
-                // Let the lowest_workload_task finish its run
-                next_running = lowest_workload_task;
-            } else {
-                // Select the highest_workload_task
-                next_running = highest_workload_task;
-            }
-        } else if (CONFIG_TIMESLICE_FINETUNING) {
-            // Remain Round-Robin logic in this case
-            next_running = list_entry(ready_queue.next, pcb_t, list);
-            // Ensure next_running is in current lap
-            if (next_running->lap_count > min_lap_count) {
-                next_running = lowest_lapcount_task;
-            }
-            uint64_t timeslice = calculate_timeslice(next_running, min_lap_count);
-            // Find terminating tasks
-            pcb_t *terminating_task = find_terminating_tasks(min_lap_count);
-            if (terminating_task) {
-                next_running = terminating_task;
-                timeslice = TIMER_INTERVAL;
-            }
-            bios_set_timer(get_ticks() + timeslice);
-        }
-
-        // 2. Remove it from the ready queue
-        list_del(&next_running->list);
-    }
-#else
-    // --- Original Round-Robin Logic ---
-    if (!list_is_empty(&ready_queue)) {
-        next_running = list_entry(ready_queue.next, pcb_t, list);
-        list_del(ready_queue.next);
-    } else {
-        next_running = &pid0_pcb;
+        // ... standard priority logic (finding highest priority task) ...
     }
 #endif
 
-    current_running = next_running;
-    current_running->status = TASK_RUNNING;
+    // ... switch_to logic ...
+    
+    // Update diagnostic info for 'ps'
+    if (prev_running->pid > 0) prev_running->on_cpu = 0xF; // 0xF indicates not currently running
+    if (next_running->pid > 0) next_running->on_cpu = core_id;
 
-    // Update prev_running's last run time
-    prev_running->last_run_time = get_ticks();
-
-    // [p2-task1] switch_to current_running
-    switch_to(prev_running, current_running);
+    switch_to(prev_running, CURRENT_RUNNING);
 }
 ```
 
-#### d. Lap-Aware Proportional Timeslice Algorithm (`sched.c`)
+### Step 3: Setting Affinity via System Calls
 
-The core logic resides in the `do_scheduler` and a new `calculate_timeslice` function, which activates when `CONFIG_TIMESLICE_FINETUNING` is enabled.
+We need two ways to set affinity:
+1.  **During Creation:** Launching a new program with a specific mask.
+2.  **During Execution:** Changing the mask of an already running process.
 
-1.  **Prioritize by Lap**: The scheduler first determines the current "race" by finding the minimum `lap_count` among all tasks in the `ready_queue`. It will only consider scheduling tasks that belong to this earliest lap, effectively creating a barrier that holds back tasks on future laps.
-
-```c
-// In sched.c
-// related logic could be found in previous codeblock
-```
-
-2.  **Select Task**: Within the current lap, the next task is chosen using a simple round-robin policy. A check ensures that if the chosen task is accidentally from a future lap, the selection falls back to a task from the correct `min_lap_count` group.
+#### 3.1. Modifying `sys_exec` (Inheritance & Initialization)
+We modified `do_exec` in `kernel/sched/sched.c` to accept a `mask` argument.
+*   **Inheritance Rule:** If the user provides `mask = 0` (default), the child inherits the `cpu_mask` of the parent (`current_running`).
+*   **Explicit Assignment:** If `mask != 0`, use the provided value.
 
 ```c
-// In sched.c
-// related logic could be found in previous codeblock
-```
-
-3.  **Calculate Proportional Timeslice**: The `calculate_timeslice` function computes the timeslice for the selected task.
-    *   It is lap-aware: to find the `max_workload`, it only considers other tasks that are also in the current `min_lap_count`.
-    *   It uses the formula `(workload / max_workload) * MAX_INTERVAL` to give tasks that are behind (higher workload) a longer timeslice.
-    *   The timeslice is clamped to a `MIN_INTERVAL` to guarantee that even tasks far ahead get a small amount of CPU time, ensuring they never appear to freeze.
-
-
-    ```C
-    // In sched.c
-    uint64_t calculate_timeslice(pcb_t *task_to_run, int min_lap_count)
+pid_t do_exec(char *name, int argc, char *argv[], uint64_t mask)
 {
-    // If only one task is ready, or it's the idle task, use the default interval.
-    if (list_is_empty(&ready_queue) || task_to_run->pid == 0) {
-        return TIMER_INTERVAL;
+    // ... (Loading task image) ...
+
+    // Initialize PCB fields...
+    
+    // Set CPU mask for the new process
+    if (mask == 0) {
+        new_pcb->cpu_mask = current_running->cpu_mask; // Inherit
+    } else {
+        new_pcb->cpu_mask = mask; // Set explicitly
     }
 
-    // 1. Find the maximum workload among all tasks in the ready queue.
-    //    We also consider the task that is about to run.
-    int max_workload = task_to_run->remaining_workload;
-    list_node_t *node;
-    for (node = ready_queue.next; node != &ready_queue; node = node->next) {
-        pcb_t *task = list_entry(node, pcb_t, list);
-        if (task->remaining_workload > max_workload && task->lap_count == min_lap_count) {
-            max_workload = task->remaining_workload;
+    // ... (Stack setup and queuing) ...
+}
+```
+
+#### 3.2. Implementing `sys_taskset` (Runtime Modification)
+We added a new syscall `do_taskset` to locate a running process by PID and update its mask.
+
+```c
+void do_taskset(int mask, pid_t pid)
+{
+    pcb_t *target_pcb = NULL;
+    // Search for the PCB
+    for (int i = 0; i < NUM_MAX_TASK; i++) {
+        if (pcb[i].pid == pid) {
+            target_pcb = &pcb[i];
+            break;
         }
     }
 
-    if (max_workload == 0) {
-        return TIMER_INTERVAL; // Avoid division by zero.
+    if (target_pcb != NULL) {
+        klog("Setting affinity of PID %d to mask 0x%x\n", pid, mask);
+        target_pcb->cpu_mask = mask;
+    } else {
+        printk("ERROR: taskset failed, PID %d not found.\n", pid);
     }
-
-    // 2. Define the bounds for our dynamic timeslice.
-    const uint64_t MIN_INTERVAL = TIMER_INTERVAL / 5; // e.g., 3000
-    const uint64_t MAX_INTERVAL = TIMER_INTERVAL * 5; // e.g., 75000
-
-    // 3. Calculate the proportional timeslice using integer arithmetic.
-    // A task with a higher workload gets a proportionally longer timeslice.
-    uint64_t new_interval = ((uint64_t)task_to_run->remaining_workload *
-        MAX_INTERVAL) / max_workload;
-
-    // 4. Clamp the value to our defined min/max bounds.
-    // This ensures that tasks far ahead still get a small amount of time to run,
-    // preventing them from stopping completely.
-    if (new_interval < MIN_INTERVAL) {
-        return MIN_INTERVAL;
-    }
-
-    // The upper bound is naturally handled by the formula, since
-    // task_to_run->remaining_workload cannot be greater than max_workload.
-    return new_interval;
 }
 ```
 
-4.  **"Finish Line" Optimization**: A new helper function, `find_terminating_tasks`, was introduced. It identifies tasks that are about to finish the current lap (`remaining_workload <= 1`). The scheduler gives these tasks priority and a standard timeslice to ensure they cross the finish line smoothly.
+### Step 4: User Space Shell Command (`test/shell.c`)
 
-```C
-// In sched.c
-// Helping strategy: prioritizing the tasks that are about to terminate
-pcb_t *find_terminating_tasks(int min_lap_count)
+We implemented the `taskset` command in the shell to parse user input and call the appropriate syscalls.
+
+**Helper: Hex Parsing**
+Since masks are typically hex (e.g., `0x3`), we added a parser:
+```c
+static uint64_t parse_hex(char *s) {
+    // Skips "0x" if present and converts string to integer
+    // ... implementation details ...
+}
+```
+
+**Command Handler: `cmd_taskset`**
+Handles two syntax modes:
+1.  `taskset -p mask pid`: Calls `sys_taskset` to modify a running process.
+2.  `taskset mask name [args]`: Calls `sys_exec_with_mask` to launch a new process.
+
+```c
+void cmd_taskset(char *args) {
+    // ... Tokenize args ...
+
+    // Mode 1: Change existing PID
+    if (strcmp(argv[0], "-p") == 0) {
+        uint64_t mask = parse_hex(argv[1]);
+        pid_t pid = atoi(argv[2]);
+        sys_taskset(mask, pid); 
+        printf("Set affinity of pid %d to mask 0x%x\n", pid, mask);
+    } 
+    // Mode 2: Start new task
+    else {
+        uint64_t mask = parse_hex(argv[0]);
+        char *task_name = argv[1];
+        // ... Setup arguments ...
+        pid_t pid = sys_exec_with_mask(task_name, task_argc, task_argv, mask);
+    }
+}
+```
+
+### Step 5: Verification (`affinity.c`)
+
+We use the provided test case `affinity.c` to verify functionality.
+1.  **Launch:** `taskset 0x1 affinity`.
+    *   **Observation:** Use `ps`. All 5 generated sub-tasks should show `CPU: 0`.
+2.  **Migration:** `taskset -p 0x2 <child_pid>`.
+    *   **Observation:** The specific child PID should move to `CPU: 1` in `ps`. It should also noticeably run faster (printing more output lines) if Core 1 was previously idle.
+3.  **Validation:** The test prints `auipc` values. Since all threads share the same code memory (`0x56000000` range for C-Core), the `auipc` values should be identical, proving they are lightweight threads/processes sharing the image (Task 4 specific requirement for C-Core).
+
+---
+
+# Project 3 Task 5: Multicore Mailbox Deadlock Prevention Implementation Document
+
+## 1. Overview & Problem Statement
+In a multicore environment using blocking IPC (Inter-Process Communication), resource deadlocks can occur if processes wait for resources in a circular chain.
+
+**The Scenario:**
+1.  **Mailbox 1** and **Mailbox 2** are completely full.
+2.  **Process A** wants to: Send to Mbox 1 (Blocked: Full) $\to$ Receive from Mbox 2.
+3.  **Process B** wants to: Send to Mbox 2 (Blocked: Full) $\to$ Receive from Mbox 1.
+
+Since blocking `send` puts the process to sleep, Process A cannot reach the code to read Mbox 2, and Process B cannot reach the code to read Mbox 1. They wait for each other indefinitely.
+
+**The Solution:**
+Break the "Hold and Wait" condition by implementing **Kernel-Supported Threads**. By splitting the "Send" and "Receive" logic into separate execution threads, the Scheduler can run the "Receiver Thread" even if the "Sender Thread" is blocked, thereby clearing space in the mailbox and resolving the deadlock.
+
+---
+
+## 2. Implementation: Kernel Threading Mechanism
+
+We chose a **1:1 Threading Model**, where every user thread corresponds to a unique Kernel PCB. This allows the kernel scheduler to manage threads naturally across multiple cores.
+
+### 2.1. `do_thread_create` (`kernel/sched/sched.c`)
+This function spawns a new thread. It is similar to `fork`, but instead of duplicating memory, it shares the parent's attributes while allocating a **fresh stack**.
+
+**Key Implementation Steps:**
+1.  **PCB Allocation:** Find an unused PCB.
+2.  **Attribute Inheritance:** Copy `pid` (incremented), `cpu_mask`, `task_name`, and `lap_count` from the parent.
+3.  **Stack Allocation:** **Crucial.** Threads share code/globals but *cannot* share a stack while running concurrently. We allocate new Kernel and User pages for the thread.
+4.  **Context Initialization:** Reuse `init_pcb_stack`.
+    *   `sepc`: Set to the function pointer passed by the user.
+    *   `a0`: Set to the argument passed by the user.
+5.  **Safety:** Explicitly initialize `wait_list` to prevent kernel panics (Store/AMO faults) when the thread eventually exits.
+
+```c
+void do_thread_create(ptr_t func, uint64_t arg)
 {
-    if (list_is_empty(&ready_queue)) {
-        return NULL;
-    }
+    pcb_t *current_running = CURRENT_RUNNING;
+    // ... Find free PCB (new_pcb) ...
 
-    list_node_t *node;
-    for (node = ready_queue.next; node != &ready_queue; node = node->next) {
-        pcb_t *task = list_entry(node, pcb_t, list);
-        if (task->remaining_workload <= 1 && task->lap_count == min_lap_count) {
-             return task;
-        }
-    }
+    // Inherit attributes
+    new_pcb->cpu_mask = current_running->cpu_mask;
+    new_pcb->task_name = current_running->task_name;
 
-    return NULL;
+    // Initialize Wait List (Critical Fix for Exit Crash)
+    list_init(&new_pcb->wait_list);
+
+    // Allocate UNIQUE stacks for this thread
+    new_pcb->kernel_stack_base = allocKernelPage(KERNEL_STACK_PAGES);
+    new_pcb->user_stack_base = allocUserPage(USER_STACK_PAGES);
+    
+    ptr_t kstack = new_pcb->kernel_stack_base + KERNEL_STACK_PAGES * PAGE_SIZE;
+    ptr_t ustack = new_pcb->user_stack_base + USER_STACK_PAGES * PAGE_SIZE;
+
+    // Setup Context
+    // We pass 'arg' (mailbox ID) into the register typically used for argc (a0)
+    init_pcb_stack(kstack, ustack, func, (int)arg, NULL, new_pcb);
+
+    list_add_tail(&new_pcb->list, &ready_queue);
 }
 ```
 
-### 4. Final Result
+### 2.2. System Call Registration
+*   **ID:** Added `SYSCALL_THREAD_CREATE` (60) to `include/sys/syscall.h`.
+*   **Handler:** Registered `do_thread_create` in `init_syscall` (`init/main.c`).
+*   **Wrapper:** Added `sys_thread_create` in `tiny_libc/syscall.c` to invoke the `ecall`.
 
-The kernel now features a sophisticated dynamic scheduler that successfully synchronizes multiple processes with different execution characteristics. It achieves this by creating "soft barriers" at checkpoints and lap boundaries, intelligently allocating CPU time based on each task's real-time progress. This was accomplished purely within the kernel by observing task behavior through a single system call, requiring no changes to the user programs themselves.
+### 2.3. Configuration Updates
+Since spawning threads consumes PCBs rapidly, we increased the system limit.
+*   **`NUM_MAX_TASK`** (sched.h) & **`TASK_MAXNUM`** (task.h): Increased from 16 to **32**.
+*   **`createimage.c`**: Updated matching constant to ensure the bootloader reads the correct metadata size.
 
+---
+
+## 3. Task 5.1: Deadlock Reproduction
+
+We created `test/test_project3/deadlock.c` to prove the issue exists.
+
+**Logic:**
+1.  Open `mbox1` and `mbox2`.
+2.  **Fill Phase:** Loop 64 times sending data to both mailboxes until they are full.
+3.  **Client A:** Calls `sys_mbox_send(mbox1)` then `sys_mbox_recv(mbox2)`.
+4.  **Client B:** Calls `sys_mbox_send(mbox2)` then `sys_mbox_recv(mbox1)`.
+
+**Result:**
+The shell shows both clients starting the "Send" operation, but neither ever reaches the "Receive" print statement. The system hangs (regarding these tasks), proving the circular wait.
+
+---
+
+## 4. Task 5.3: Deadlock Avoidance (The Solution)
+
+We created `test/test_project3/deadlock_sol.c` to demonstrate the fix using our new threading API.
+
+**Logic:**
+Instead of performing Send/Recv sequentially in one stream, we spawn two threads per client.
+
+**Thread Functions:**
+```c
+void sender_func(void *arg) {
+    int mbox_id = (int)(long)arg;
+    // Blocks here if full, but doesn't stop the receiver thread!
+    sys_mbox_send(mbox_id, "x", 1); 
+    sys_exit();
+}
+
+void recver_func(void *arg) {
+    int mbox_id = (int)(long)arg;
+    char buf[10];
+    // Reads data, clearing space in the mailbox
+    sys_mbox_recv(mbox_id, buf, 1);
+    sys_exit();
+}
+```
+
+**Execution Flow:**
+1.  Client A spawns **Thread A-Send** (target Mbox1) and **Thread A-Recv** (target Mbox2).
+2.  Client B spawns **Thread B-Send** (target Mbox2) and **Thread B-Recv** (target Mbox1).
+3.  **Thread A-Send** blocks (Mbox1 full).
+4.  **Thread A-Recv** runs. It reads from Mbox2.
+5.  **Thread B-Send** (blocked on Mbox2) is now unblocked because A-Recv cleared space.
+6.  **Thread B-Recv** runs. It reads from Mbox1.
+7.  **Thread A-Send** (blocked on Mbox1) is now unblocked because B-Recv cleared space.
+
+**Result:**
+All threads complete successfully. The deadlock is resolved because the "Wait" (Receive) is not dependent on the "Hold" (Send) completing first.
+
+---
+
+## 5. Verification
+
+1.  **Compile:** `make clean && make`.
+2.  **Run:** `make run` (QEMU).
+3.  **Test Deadlock:**
+    ```text
+    > root@UCAS_OS: exec deadlock
+    [A] SENDING to mbox1 (Full)...
+    [B] SENDING to mbox2 (Full)...
+    (System hangs here indefinitely)
+    ```
+4.  **Test Solution:**
+    ```text
+    > root@UCAS_OS: exec deadlock_sol
+    [Thread-Send] Sending...
+    [Thread-Recv] Recving... Done!
+    [Thread-Send] Sending... Done!
+    (All tasks finish, shell returns)
+    ```
+
+This confirms that the threading mechanism was implemented correctly and successfully resolves the IPC deadlock.
