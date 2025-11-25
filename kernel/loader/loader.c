@@ -4,10 +4,10 @@
 #include <os/string.h>
 #include <os/kernel.h>
 #include <type.h>
-#define MAX_APP_SECTOR_NUM 16
+#define MAX_APP_SECTOR_NUM 32
 
 // temp buffer to contain the content of sd_read
-static char temp_load_buffer[16 * SECTOR_SIZE] = {0};
+static char temp_load_buffer[32 * SECTOR_SIZE] = {0};
 
 /**
  * @brief Prints a single byte as a two-digit hexadecimal value.

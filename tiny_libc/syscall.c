@@ -291,4 +291,9 @@ int sys_mbox_recv(int mbox_idx, void *msg, int msg_length)
     /* TODO: [p3-task2] call invoke_syscall to implement sys_mbox_recv */
     return invoke_syscall(SYSCALL_MBOX_RECV, (long)mbox_idx, (long)msg, (long)msg_length, 0, 0);
 }
+
+void sys_thread_create(void (*func)(void *), void *arg)
+{
+    invoke_syscall(SYSCALL_THREAD_CREATE, (long)func, (long)arg, 0, 0, 0);
+}
 /************************************************************/

@@ -54,6 +54,7 @@ int sys_mbox_open(char * name);
 void sys_mbox_close(int mbox_id);
 int sys_mbox_send(int mbox_idx, void *msg, int msg_length);
 int sys_mbox_recv(int mbox_idx, void *msg, int msg_length);
+void sys_thread_create(void (*func)(void *), void *arg);
 /************************************************************/
 
 #endif

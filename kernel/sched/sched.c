@@ -658,3 +658,61 @@ void do_taskset(int mask, pid_t pid)
     }
 
 }
+
+void do_thread_create(ptr_t func, uint64_t arg)
+{
+    // 1. Get current process
+    pcb_t *current_running = CURRENT_RUNNING;
+
+    // 2. Find a free PCB
+    pcb_t *new_pcb = NULL;
+    int i;
+    // Simple search for free PCB
+    for (i = 0; i < NUM_MAX_TASK; i++) {
+        if (pcb[i].status == TASK_UNUSED || pcb[i].status == TASK_EXITED) {
+            new_pcb = &pcb[i];
+            break;
+        }
+    }
+    
+    if (new_pcb == NULL) {
+        printk("Error: PCB full, cannot create thread.\n");
+        return;
+    }
+
+    // 3. Initialize PCB fields
+    // Basic Info
+    list_init(&new_pcb->wait_list);
+    new_pcb->pid = process_id++;
+    new_pcb->status = TASK_READY;
+    new_pcb->cursor_x = current_running->cursor_x;
+    new_pcb->cursor_y = current_running->cursor_y;
+    new_pcb->task_name = current_running->task_name; // Share name for now
+    new_pcb->cpu_mask = current_running->cpu_mask;   // Inherit affinity
+    new_pcb->lap_count = current_running->lap_count;
+    new_pcb->remaining_workload = 1; // Default slice
+
+    // 4. Stack Allocation
+    // IMPORTANT: We must allocate a NEW kernel stack and a NEW user stack 
+    // so the thread doesn't clobber the parent's stack.
+    
+    // Re-use the pcb's existing stack base pointers if they were allocated at init, 
+    // or alloc new ones if this PCB was recycled.
+    // In your current mm.c, alloc functions just increment a pointer, they don't support free.
+    // Assuming pcb[] array is static and stacks were pre-allocated or we just alloc new ones:
+    // new_pcb->kernel_stack_base = allocKernelPage(KERNEL_STACK_PAGES);
+    // new_pcb->user_stack_base = allocUserPage(USER_STACK_PAGES);
+    
+    new_pcb->kernel_sp = new_pcb->kernel_stack_base + KERNEL_STACK_PAGES * PAGE_SIZE;
+    new_pcb->user_sp = new_pcb->user_stack_base + USER_STACK_PAGES * PAGE_SIZE;
+
+    // 5. Initialize Context (The "Fake" Stack Frame)
+    ptr_t kernel_stack = new_pcb->kernel_sp;
+    ptr_t user_stack = new_pcb->user_sp;
+    
+    // Call init_pcb_stack
+    init_pcb_stack(kernel_stack, user_stack, func, arg, NULL, new_pcb);
+
+    // 6. Add to Ready Queue
+    list_add_tail(&new_pcb->list, &ready_queue);
+}

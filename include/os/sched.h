@@ -35,7 +35,7 @@
 #include <os/lock.h>
 #include <os/list.h>
 
-#define NUM_MAX_TASK 16
+#define NUM_MAX_TASK 32
 
 /* Enable priority scheduling */
 #define PRIORITY_SCHEDULING 1
@@ -152,6 +152,7 @@ extern const ptr_t s_pid0_stack;
 
 extern void switch_to(pcb_t *prev, pcb_t *next);
 extern void fake_switch_to_context();
+extern void ret_from_exception();
 void do_scheduler(void);
 void do_sleep(uint32_t);
 
@@ -181,6 +182,7 @@ extern int do_waitpid(pid_t pid);
 extern void do_process_show();
 extern pid_t do_getpid();
 void do_taskset(int mask, pid_t pid);
+void do_thread_create(ptr_t func, uint64_t arg);
 
 // Multi-core related data structures
 typedef struct cpu {
