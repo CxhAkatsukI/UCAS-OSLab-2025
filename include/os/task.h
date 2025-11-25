@@ -34,6 +34,7 @@ typedef struct {
     uint16_t size;
     uint32_t byte_offset;
     uint32_t byte_size;
+    ptr_t load_address;
 } task_info_t;
 
 // extern task array

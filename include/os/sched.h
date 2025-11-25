@@ -97,6 +97,10 @@ typedef struct pcb
     /* process id */
     pid_t pid;
 
+    /* CPU info */
+    uint64_t cpu_mask; // A bitmap of allowed CPUs
+    int on_cpu;        // Which CPU the task is running on
+
     /* process name */
     char *task_name;
 
@@ -159,7 +163,6 @@ pcb_t *find_terminating_tasks(int min_lap_count);
 
 // helper function for do_exec
 int search_task_name(int tasknum, char *name);
-pid_t do_exec(char *name, int argc, char **argv);
 
 void init_pcb_stack(
     ptr_t kernel_stack, ptr_t user_stack, ptr_t entry_point, int argc, char *argv[],
@@ -170,13 +173,14 @@ void init_pcb_stack(
 #ifdef S_CORE
 extern pid_t do_exec(int id, int argc, uint64_t arg0, uint64_t arg1, uint64_t arg2);
 #else
-extern pid_t do_exec(char *name, int argc, char *argv[]);
+extern pid_t do_exec(char *name, int argc, char *argv[], uint64_t mask);
 #endif
 extern void do_exit(void);
 extern int do_kill(pid_t pid);
 extern int do_waitpid(pid_t pid);
 extern void do_process_show();
 extern pid_t do_getpid();
+void do_taskset(int mask, pid_t pid);
 
 // Multi-core related data structures
 typedef struct cpu {

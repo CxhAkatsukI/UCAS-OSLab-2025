@@ -4,7 +4,7 @@
 #include <assert.h>
 #include <string.h>
 
-#define MAX_ITERATION 150
+#define MAX_ITERATION 15000
 #define INTEGER_TEST_CHUNK 100000
 
 char * test[] = 

@@ -14,6 +14,7 @@ void cmd_ps(char *args);
 void cmd_clear(char *args);
 void cmd_exec(char *args);
 void cmd_kill(char *args);
+void cmd_taskset(char *args);
 
 // The command table for our shell
 command_t cmd_table[] = {
@@ -21,7 +22,8 @@ command_t cmd_table[] = {
     {"ps", "List all running processes.", cmd_ps},
     {"clear", "Clear the screen.", cmd_clear},
     {"exec", "Execute a task by name. Usage: exec <task_name>", cmd_exec},
-    {"kill", "Kill a process by its PID. Usage: kill <pid>", cmd_kill}
+    {"kill", "Kill a process by its PID. Usage: kill <pid>", cmd_kill},
+    {"taskset", "Set or retrieve the CPU affinity of a process.", cmd_taskset}
 };
 
 #define NR_CMD (sizeof(cmd_table) / sizeof(command_t))
@@ -231,6 +233,83 @@ void run_command_loop() {
         }
     }
 }
+
+/**
+ * @brief Parses a hexadecimal string into a uint64_t.
+ * Handles "0x" prefix.
+ * @param s The string to parse.
+ * @return The parsed uint64_t value.
+ */
+static uint64_t parse_hex(char *s) {
+    uint64_t res = 0;
+    if (s == NULL) return 0;
+
+    // Skip "0x" prefix if present
+    if (strlen(s) > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        s += 2;
+    }
+
+    while (*s != '\0') {
+        res <<= 4; // Shift left by 4 bits for the next hex digit
+        if (*s >= '0' && *s <= '9') {
+            res |= (*s - '0');
+        } else if (*s >= 'a' && *s <= 'f') {
+            res |= (*s - 'a' + 10);
+        } else if (*s >= 'A' && *s <= 'F') {
+            res |= (*s - 'A' + 10);
+        } else {
+            // Invalid hex character, stop parsing
+            break;
+        }
+        s++;
+    }
+    return res;
+}
+
+void cmd_taskset(char *args) {
+    if (args == NULL) {
+        printf("Usage: taskset <mask> <program> [args ...]\n");
+        printf("    or: taskset -p <mask> <pid>\n");
+        return;
+    }
+
+    char *argv[MAX_ARGS];
+    int argc = tokenize_string(args, argv, MAX_ARGS);
+
+    if (argc < 2) {
+        printf("Error: Too few arguments for taskset.\n");
+        return;
+    }
+
+    // Check for the "-p" flag for setting PID affinity
+    if (strcmp(argv[0], "-p") == 0) {
+        if (argc != 3) {
+            printf("Usage: taskset -p <mask> <pid>\n");
+            return;
+        }
+        uint64_t mask = parse_hex(argv[1]);
+        pid_t pid = atoi(argv[2]);
+        sys_taskset(mask, pid); // This is the new syscall we need
+        printf("Set affinity of pid %d to mask 0x%x\n", pid, mask);
+    } else {
+        // This is for launching a new task with a specific mask
+        uint64_t mask = parse_hex(argv[0]);
+        char *task_name = argv[1];
+
+        // The remaining arguments are for the new program itself
+        int task_argc = argc - 1;
+        char **task_argv = &argv[1];
+
+        pid_t pid = sys_exec_with_mask(task_name, task_argc, task_argv, mask);
+
+        if (pid != 0) {
+            printf("Successfully executed task '%s' with mask 0x%x, pid = %d\n", task_name, mask, pid);
+        } else {
+            printf("Error: Failed to execute task '%s'\n", task_name);
+        }
+    }
+}
+
 
 /**
  * @brief Main entry point for the shell program.

@@ -28,6 +28,8 @@ int  sys_getchar(void);
 // pid_t  sys_exec(int id, int argc, uint64_t arg0, uint64_t arg1, uint64_t arg2);
 // A/C-core
 pid_t  sys_exec(char *name, int argc, char **argv);
+pid_t  sys_exec_with_mask(char *name, int argc, char **argv, uint64_t mask);
+void   sys_taskset(int mask, pid_t pid);
 
 void sys_exit(void);
 int  sys_kill(pid_t pid);

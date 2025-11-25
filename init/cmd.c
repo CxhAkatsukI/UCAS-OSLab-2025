@@ -93,38 +93,6 @@ static int read_line(char *buffer, int max_len) {
 }
 
 /**
- * @brief Parses a hexadecimal string into a uint64_t.
- * Handles "0x" prefix.
- * @param s The string to parse.
- * @return The parsed uint64_t value.
- */
-static uint64_t parse_hex(char *s) {
-    uint64_t res = 0;
-    if (s == NULL) return 0;
-
-    // Skip "0x" prefix if present
-    if (strlen(s) > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
-        s += 2;
-    }
-
-    while (*s != '\0') {
-        res <<= 4; // Shift left by 4 bits for the next hex digit
-        if (*s >= '0' && *s <= '9') {
-            res |= (*s - '0');
-        } else if (*s >= 'a' && *s <= 'f') {
-            res |= (*s - 'a' + 10);
-        } else if (*s >= 'A' && *s <= 'F') {
-            res |= (*s - 'A' + 10);
-        } else {
-            // Invalid hex character, stop parsing
-            break;
-        }
-        s++;
-    }
-    return res;
-}
-
-/**
  * @brief Prints a hexadecimal dump of a memory region.
  * @param addr The starting address of the memory region.
  * @param len The number of bytes to dump.
@@ -812,6 +780,7 @@ int cmd_twrq(char *args) {
         new_pcb->kernel_sp = new_pcb->kernel_stack_base + KERNEL_STACK_PAGES * PAGE_SIZE;
         new_pcb->user_sp = new_pcb->user_stack_base + USER_STACK_PAGES * PAGE_SIZE;
         new_pcb->pid = process_id++;
+        new_pcb->cpu_mask = 0x3; // Allow the task run on both CPUs
         new_pcb->task_name = tasks[task_idx].name;
         new_pcb->status = TASK_READY;
         new_pcb->remaining_workload = 1; // An initial value, avoid the first task to starve the CPU resources

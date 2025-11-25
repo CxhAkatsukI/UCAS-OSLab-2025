@@ -1,8 +1,11 @@
-#include "os/kernel.h"
-#include "os/smp.h"
-#include "os/string.h"
-#include "type.h"
+#include "os/task.h"
+#include <os/kernel.h>
+#include <os/smp.h>
+#include <os/string.h>
+#include <type.h>
+#include <os/debug.h>
 #include <os/list.h>
+#include <os/loader.h>
 #include <os/lock.h>
 #include <os/sched.h>
 #include <os/smp.h>
@@ -24,6 +27,7 @@ pcb_t pid0_pcb = {
     .pid = 0,
     .kernel_sp = (ptr_t)pid0_stack,
     .user_sp = (ptr_t)pid0_stack,
+    .cpu_mask = 0x3, // NOTE: We must ensure default programs can run on both cores
     .task_name = "Windows",
     .status = TASK_BLOCKED
 };
@@ -33,6 +37,7 @@ pcb_t s_pid0_pcb = {
     .pid = 0,
     .kernel_sp = (ptr_t)s_pid0_stack,
     .user_sp = (ptr_t)s_pid0_stack,
+    .cpu_mask = 0x3,
     .task_name = "MS-DOS",
     .status = TASK_BLOCKED
 };
@@ -45,6 +50,10 @@ pid_t process_id = 1;
 
 void do_scheduler(void)
 {
+    // Get the current core's ID and its mask
+    uint64_t core_id = get_current_cpu_id();
+    uint64_t core_mask = 1 << core_id;
+
     // lock_kernel();
     // Use macro to set current_running pointer
     pcb_t *current_running = CURRENT_RUNNING;
@@ -70,7 +79,11 @@ void do_scheduler(void)
     if (list_is_empty(&ready_queue)) {
         next_running = &pid0_pcb;
     } else {
-        // 1. Find the task with the highest workload
+
+        // Find the first eligible task for current cpu core
+        pcb_t *first_eligible_task = NULL;
+
+        // Find the task with the highest workload
         list_node_t *current_node;
         pcb_t *highest_priority_task = NULL;
 
@@ -92,6 +105,14 @@ void do_scheduler(void)
         for (current_node = ready_queue.next; current_node != &ready_queue;
              current_node = current_node->next) {
             pcb_t *task = list_entry(current_node, pcb_t, list);
+
+            // Skip when core mask doesn't meet our requirement
+            if ((task->cpu_mask & core_mask) == 0)
+                continue;
+
+            // Set first_eligible_task
+            if (first_eligible_task == NULL)
+                first_eligible_task = task;
 
             // Calculate task_dynamic_priority
             task_dynamic_priority = task->remaining_workload + (get_ticks() - task->last_run_time) * AGING_FACTOR;
@@ -137,7 +158,7 @@ void do_scheduler(void)
             }
         } else if (CONFIG_TIMESLICE_FINETUNING) {
             // Remain Round-Robin logic in this case
-            next_running = list_entry(ready_queue.next, pcb_t, list);
+            next_running = first_eligible_task;
             // Ensure next_running is in current lap
             if (next_running->lap_count > min_lap_count) {
                 next_running = lowest_lapcount_task;
@@ -153,10 +174,18 @@ void do_scheduler(void)
         }
 
         // 2. Remove it from the ready queue
-        list_del(&next_running->list);
+        if (next_running != NULL) {
+            list_del(&next_running->list);
+        } else {
+            if (core_id == 0) {
+                next_running = &pid0_pcb;
+            } else {
+                next_running = &s_pid0_pcb;
+            }
+        }
     }
 #else
-    // --- Original Round-Robin Logic ---
+    // --- Original Round-Robin Logic (deprecated for multi-core) ---
     if (!list_is_empty(&ready_queue)) {
         next_running = list_entry(ready_queue.next, pcb_t, list);
         list_del(ready_queue.next);
@@ -173,6 +202,14 @@ void do_scheduler(void)
 
     // Update prev_running's last run time
     prev_running->last_run_time = get_ticks();
+
+    // Set the task's on_cpu field for `ps` command
+    if (prev_running->pid > 0) prev_running->on_cpu = 0xF;
+    if (next_running->pid > 0) next_running->on_cpu = core_id;
+
+    // Log the decision made by the scheduler
+    klog("Scheduler on core %d picker task '%s' (PID %d) with mask 0x%x\n",
+         core_id, next_running->task_name, next_running->pid, next_running->cpu_mask);
 
     // [p2-task1] switch_to current_running
     switch_to(prev_running, CURRENT_RUNNING);
@@ -290,6 +327,9 @@ uint64_t calculate_timeslice(pcb_t *task_to_run, int min_lap_count)
 // Helping strategy: prioritizing the tasks that are about to terminate
 pcb_t *find_terminating_tasks(int min_lap_count)
 {
+    uint64_t core_id = get_current_cpu_id();
+    uint64_t core_mask = 1 << core_id;
+
     if (list_is_empty(&ready_queue)) {
         return NULL;
     }
@@ -297,7 +337,8 @@ pcb_t *find_terminating_tasks(int min_lap_count)
     list_node_t *node;
     for (node = ready_queue.next; node != &ready_queue; node = node->next) {
         pcb_t *task = list_entry(node, pcb_t, list);
-        if (task->remaining_workload <= 1 && task->lap_count == min_lap_count) {
+        if (task->remaining_workload <= 1 && task->lap_count == min_lap_count
+            && (task->cpu_mask & core_mask) != 0) {
              return task;
         }
     }
@@ -320,7 +361,7 @@ static const char *get_status_string(task_status_t status)
 void do_process_show()
 {
     bios_putstr(ANSI_FMT("[PROCESS TABLE]\n\r", ANSI_FG_GREEN));
-    bios_putstr(ANSI_FMT("PID   STATUS    KERNEL_SP        USER_SP        NAME\n\r", ANSI_FG_YELLOW));
+    bios_putstr(ANSI_FMT("PID   STATUS    KERNEL_SP     USER_SP       CPU    MASK    NAME\n\r", ANSI_FG_YELLOW));
     bios_putstr(ANSI_FG_CYAN);
 
     // Get current_running from macro
@@ -333,11 +374,13 @@ void do_process_show()
     for (int i = 0; i < process_id; i++) {
         // Only print tasks that haven't exited
         if (pcb[i].status != TASK_EXITED && pcb[i].status != TASK_UNUSED) {
-            printk("%d     %s   0x%lx       0x%lx     %s\n",
+            printk("%d     %s   0x%lx    0x%lx    0x%x    0x%x     %s\n",
                    pcb[i].pid,
                    get_status_string(pcb[i].status),
                    pcb[i].kernel_sp,
                    pcb[i].user_sp,
+                   pcb[i].on_cpu,
+                   pcb[i].cpu_mask,
                    pcb[i].task_name);
         }
     }
@@ -345,7 +388,7 @@ void do_process_show()
     bios_putstr(ANSI_NONE);
 }
 
-pid_t do_exec(char *name, int argc, char *argv[])
+pid_t do_exec(char *name, int argc, char *argv[], uint64_t mask)
 {
 
     // Get current_running from macro
@@ -378,8 +421,34 @@ pid_t do_exec(char *name, int argc, char *argv[])
             new_pcb = &pcb[NUM_MAX_TASK - 1];
     }
 
-    // Load the task into memory
-    ptr_t entry_point = load_task_img(tasks[task_idx].name, tasknum, next_task_addr);
+    // Variable for the entry point of a program
+    ptr_t entry_point;
+
+    // If static loading is enabled, modify next_task_addr
+    if (CONFIG_STATIC_LOADING) {
+        next_task_addr = TASK_MEM_BASE + TASK_SIZE * task_idx;
+    }
+
+    // Check if the task has been loaded before
+    if (tasks[task_idx].load_address == 0) {
+        entry_point = load_task_img(tasks[task_idx].name, tasknum, next_task_addr);
+
+        // Save the load address for future executions
+        tasks[task_idx].load_address = entry_point;
+
+        // Update the next available task address, page-aligned
+        next_task_addr += tasks[task_idx].byte_size;
+        next_task_addr = (next_task_addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+
+        // Log the operation
+        klog("First load of '%s' at address 0x%lx\n", tasks[task_idx].name, entry_point);
+    } else {
+        // Get the entry point from the saved load address
+        entry_point = tasks[task_idx].load_address;
+
+        // Log the operation
+        klog("Re-executing '%s' from address 0x%lx\n", tasks[task_idx].name, entry_point);
+    }
 
     // Initialize the PCB
     list_init(&new_pcb->wait_list);
@@ -391,6 +460,13 @@ pid_t do_exec(char *name, int argc, char *argv[])
     new_pcb->cursor_x = 0;
     new_pcb->cursor_y = process_id; // Give each task its own line
     new_pcb->lap_count = 0;
+
+    // Set CPU mask for the new process
+    if (mask == 0) {
+        new_pcb->cpu_mask = current_running->cpu_mask;
+    } else {
+        new_pcb->cpu_mask = mask;
+    }
 
     // Tackle user_sp, copying actual string onto user stack
     ptr_t user_stack_top = new_pcb->user_stack_base + USER_STACK_PAGES * PAGE_SIZE;
@@ -423,10 +499,6 @@ pid_t do_exec(char *name, int argc, char *argv[])
 
     // Add the initialized PCB to the ready queue
     list_add_tail(&new_pcb->list, &ready_queue);
-
-    // Update the next available task address, page-aligned
-    next_task_addr += tasks[task_idx].byte_size;
-    next_task_addr = (next_task_addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
 
     // Update global process_id and return
     return new_pcb->pid;
@@ -564,4 +636,25 @@ int do_waitpid(pid_t pid)
     }
 
     return pid;
+}
+
+// This will handle `taskset -p mask pid`
+void do_taskset(int mask, pid_t pid)
+{
+
+    pcb_t *target_pcb = NULL;
+    for (int i = 0; i < NUM_MAX_TASK; i++) {
+        if (pcb[i].pid == pid) {
+            target_pcb = &pcb[i];
+            break;
+        }
+    }
+
+    if (target_pcb != NULL) {
+        klog("Setting affinity of PID %d to mask 0x%x\n", pid, mask);
+        target_pcb->cpu_mask = mask;
+    } else {
+        printk("ERROR: taskset failed, PID %d not found.\n", pid);
+    }
+
 }

@@ -151,6 +151,18 @@ pid_t  sys_exec(char *name, int argc, char **argv)
 }
 #endif
 
+// Wrapper for do_exec function WITHOUT adding a new syscall
+pid_t sys_exec_with_mask(char *name, int argc, char **argv, uint64_t mask)
+{
+    return invoke_syscall(SYSCALL_EXEC, (long)name, (long)argc, (long)argv, (long)mask, 0);
+}
+
+// Taskset function
+void sys_taskset(int mask, pid_t pid)
+{
+    invoke_syscall(SYSCALL_TASKSET, (long)mask, (long)pid, 0, 0, 0);
+}
+
 void sys_exit(void)
 {
     /* TODO: [p3-task1] call invoke_syscall to implement sys_exit */

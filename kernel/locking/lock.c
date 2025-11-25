@@ -101,7 +101,7 @@ void do_mutex_lock_acquire(int mlock_idx)
 
     while (1) {
         // Acquire the internal spinlock to check the mutex status safely
-        unlock_kernel();
+        // unlock_kernel();
         spin_lock_acquire(&lock->lock);
 
         if (lock->status == UNLOCKED) {
@@ -117,7 +117,7 @@ void do_mutex_lock_acquire(int mlock_idx)
             }
 
             spin_lock_release(&lock->lock);
-            lock_kernel();
+            // lock_kernel();
             break; // Exit the loop, we have the lock
         } else {
             // Lock is busy, so we must block
@@ -126,7 +126,7 @@ void do_mutex_lock_acquire(int mlock_idx)
 
             // Release the spinlock *before* sleeping
             spin_lock_release(&lock->lock);
-            lock_kernel();
+            // lock_kernel();
             do_scheduler();
 
             // When we wake up, loop back to try acquiring the lock again

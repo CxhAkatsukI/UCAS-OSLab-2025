@@ -267,7 +267,7 @@ static void init_pcb(void)
     cpu_table[0].current_running = &pid0_pcb;
     cpu_table[1].current_running = &s_pid0_pcb;
 
-    // NOTE: Call init_pcb_stack() to set up switch_to context for default PCBs
+    // NOTE: Call init_pcb_stack() to set up switch _to context for default PCBs
 
     // `current_running` setting is now handled by `set_current_running()` at the start of main
     // current_running = cpu_table[0].current_running;
@@ -285,6 +285,7 @@ static void init_syscall(void)
     syscall[SYSCALL_GETPID] = (long (*)())&do_getpid;
     syscall[SYSCALL_YIELD] = (long (*)())&do_scheduler;
     syscall[SYSCALL_SET_WORKLOAD] = (long (*)())&do_set_sche_workload;
+    syscall[SYSCALL_TASKSET] = (long (*)())&do_taskset;
     syscall[SYSCALL_WRITE] = (long (*)())&screen_write;
     syscall[SYSCALL_READCH] = (long (*)())&bios_getchar;
     syscall[SYSCALL_CURSOR] = (long (*)())&screen_move_cursor;

@@ -1,3 +1,4 @@
+#include "os/smp.h"
 #include "sys/syscall.h"
 #include <csr.h>
 #include <asm/unistd.h>

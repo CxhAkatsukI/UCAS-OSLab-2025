@@ -63,6 +63,7 @@ typedef struct {
     uint16_t size;
     uint32_t byte_offset;
     uint32_t byte_size;
+    uint64_t load_address;
 } task_info_t;
 
 static task_info_t taskinfo[TASK_MAXNUM];
@@ -178,6 +179,7 @@ static void create_image(int nfiles, char *files[])
             taskinfo[taskidx].start_sector = phyaddr_start_of_file / SECTOR_SIZE;
             taskinfo[taskidx].byte_offset = phyaddr_start_of_file;
             taskinfo[taskidx].byte_size = nbytes_application;
+            taskinfo[taskidx].load_address = 0;
         }
 
         /* write padding bytes */
