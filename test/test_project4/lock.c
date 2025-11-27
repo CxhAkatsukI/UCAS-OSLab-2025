@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <assert.h>
 #include <unistd.h>
+#include <stdlib.h>
 
 // LOCK2_KEY is the key of this task. You can define it as you wish.
 // We use 42 here because it is "Answer to the Ultimate Question of Life,
@@ -9,13 +10,10 @@
 
 static char blank[] = {"                                             "};
 
-/**
- * NOTE: bios APIs is used for p2-task1 and p2-task2. You need to change
- * to syscall APIs after implementing syscall in p2-task3!
-*/
-int main(void)
+int main(int argc, char *argv[])
 {
-    int print_location = 2;
+    assert(argc > 0);
+    int print_location = (argc >= 1) ? atoi(argv[1]) : 0;
     int mutex_id = sys_mutex_init(LOCK2_KEY);
     assert(mutex_id >= 0);
 
@@ -27,7 +25,7 @@ int main(void)
         sys_move_cursor(0, print_location);
         printf("> [TASK] Applying for a lock.\n");
 
-        sys_yield();
+        // sys_yield();
 
         sys_mutex_acquire(mutex_id);
 
@@ -35,7 +33,7 @@ int main(void)
         {
             sys_move_cursor(0, print_location);
             printf("> [TASK] Has acquired lock and running.(%d)\n", i);
-            sys_yield();
+            // sys_yield();
         }
 
         sys_move_cursor(0, print_location);
@@ -46,7 +44,7 @@ int main(void)
 
         sys_mutex_release(mutex_id);
 
-        sys_yield();
+        // sys_yield();
     }
 
     return 0;

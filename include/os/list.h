@@ -1,14 +1,14 @@
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
- * * * * * * * * * * * Copyright (C) 2018 Institute of Computing
+ * * * * * * * * * * * * Copyright (C) 2018 Institute of Computing
  * Technology, CAS Author : Han Shukai (email :
  * hanshukai@ict.ac.cn)
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
- * * * * * * * * * * * Changelog: 2019-8 Reimplement queue.h.
+ * * * * * * * * * * * * Changelog: 2019-8 Reimplement queue.h.
  * Provide Linux-style doube-linked list instead of original
  * unextendable Queue implementation. Luming
  * Wang(wangluming@ict.ac.cn)
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
- * * * * * * * * * * * 
+ * * * * * * * * * * * *
  *
  * Permission is hereby granted, free of charge, to any person
  * obtaining a copy of this software and associated documentation
@@ -32,7 +32,7 @@
  * OTHER DEALINGS IN THE SOFTWARE.
  *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
- * * * * * * * * * * */
+ * * * * * * * * * * * */
 
 #ifndef INCLUDE_LIST_H_
 #define INCLUDE_LIST_H_

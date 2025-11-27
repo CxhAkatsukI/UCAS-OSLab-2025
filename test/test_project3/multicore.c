@@ -35,7 +35,7 @@ int main(int argc, char* argv[])
     singleCoreArg->from = 0;
     singleCoreArg->to = MAX_RANGE;
     singleCoreArg->result = &single_core_result;
-
+    
     // single core performance
     clock_t singleCoreBegin = clock();
 

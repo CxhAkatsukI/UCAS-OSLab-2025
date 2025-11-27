@@ -3,7 +3,8 @@
 
 #include <stdint.h>
 typedef int32_t pid_t;
-
+typedef pid_t pthread_t;
+typedef uint64_t size_t;
 
 void sys_sleep(uint32_t time);
 void sys_yield(void);
@@ -55,6 +56,13 @@ void sys_mbox_close(int mbox_id);
 int sys_mbox_send(int mbox_idx, void *msg, int msg_length);
 int sys_mbox_recv(int mbox_idx, void *msg, int msg_length);
 void sys_thread_create(void (*func)(void *), void *arg);
+
+/* TODO: [P4 task4] free memory*/
+size_t sys_free_mem(void);
+/* TODO: [P4 task5] pipe*/
+int sys_pipe_open(const char *name);
+long sys_pipe_give_pages(int pipe_idx, void *src, size_t length);
+long sys_pipe_take_pages(int pipe_idx, void *dst, size_t length);
 /************************************************************/
 
 #endif

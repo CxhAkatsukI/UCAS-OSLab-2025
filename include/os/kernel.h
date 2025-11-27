@@ -3,8 +3,9 @@
 
 #include <type.h>
 #include <common.h>
+#include <pgtable.h>
 
-#define KERNEL_JMPTAB_BASE 0x51ffff00
+#define KERNEL_JMPTAB_BASE 0xffffffc051ffff00
 // Entry point for applications to return to for batch handling
 extern char KERNEL_BATCH_HANDLER_ADDR[];
 // Global buffer for passing I/O between batch tasks
