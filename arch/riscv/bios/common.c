@@ -1,13 +1,7 @@
 #include <common.h>
 #include <asm/biosdef.h>
-<<<<<<< HEAD
 #include <type.h>
-
-#define BIOS_FUNC_ENTRY 0x50150000
-=======
-
 #define BIOS_FUNC_ENTRY 0xffffffc050150000
->>>>>>> 5aaafc08ef60f04bf90fed7077a8889f8c24e40b
 #define IGNORE 0
 
 static long call_bios(long which, long arg0, long arg1, long arg2, long arg3, long arg4)

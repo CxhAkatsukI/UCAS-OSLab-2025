@@ -64,6 +64,8 @@ typedef struct {
     uint32_t byte_offset;
     uint32_t byte_size;
     uint64_t load_address;
+    uint32_t task_size;
+    uint32_t p_memsz;
 } task_info_t;
 
 static task_info_t taskinfo[TASK_MAXNUM];
@@ -141,6 +143,10 @@ static void create_image(int nfiles, char *files[])
         int phyaddr_start_of_file = phyaddr;
         nbytes_application = 0;
 
+        /* virtual memory relevant variables */
+        uint32_t p_filesz = 0;
+        uint32_t p_memsz = 0;
+
         /* open input file */
         fp = fopen(*files, "r");
         assert(fp != NULL);
@@ -168,6 +174,10 @@ static void create_image(int nfiles, char *files[])
             /* update nbytes_application */
             if (strcmp(*files, "main") != 0 && strcmp(*files, "bootblock") != 0) {
                 nbytes_application += get_filesz(phdr);
+
+                // Accumulate size for VM loading
+                p_filesz += phdr.p_filesz;
+                p_memsz += phdr.p_memsz;
             }
         }
 
@@ -180,6 +190,10 @@ static void create_image(int nfiles, char *files[])
             taskinfo[taskidx].byte_offset = phyaddr_start_of_file;
             taskinfo[taskidx].byte_size = nbytes_application;
             taskinfo[taskidx].load_address = 0;
+
+            // Store sizes for VM loading
+            taskinfo[taskidx].task_size = p_filesz;
+            taskinfo[taskidx].p_memsz = p_memsz;
         }
 
         /* write padding bytes */

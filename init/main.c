@@ -1,6 +1,7 @@
 #include "aesthetic.h"
 #include "os/list.h"
 #include "os/smp.h"
+#include "pgtable.h"
 #include <common.h>
 #include <asm.h>
 #include <asm/unistd.h>
@@ -197,7 +198,7 @@ void init_pcb_stack(
     pt_regs->regs[11] = (reg_t)argv;
 
     // Initialie `sstatus`, `SPP` field is now 0; `SPIE` field is now 1
-    // pt_regs->sstatus = SR_SPIE;
+    pt_regs->sstatus = SR_SPIE | SR_SUM; // NOTE: Allow kernel to read syscall arguments
 
     // Initialize `sepc` to the entry point
     pt_regs->sepc = entry_point;
@@ -379,7 +380,7 @@ int main(void)
         printk("> [INIT] CPU #%u has entered kernel with VM!\n",
             (unsigned int)get_current_cpu_id());
         // TODO: [p4-task1 cont.] remove the brake and continue to start user processes.
-        kernel_brake();
+        // kernel_brake();
 
         // --- Self Defined initializations ---
 
@@ -405,14 +406,14 @@ int main(void)
         //   and then execute them.
 
         // Load the global tasknum from ram
-        tasknum = *((short *)TASK_NUM_LOC);
+        tasknum = *((short *)pa2kva(TASK_NUM_LOC));
 
         // Batch mode check and handler
-        bool in_batch_mode = *(bool *)(IN_BATCH_MODE_LOC);
-        int batch_task_index = *(short *)(BATCH_TASK_INDEX_LOC);
-        int batch_total_tasks = *(short *)(BATCH_TOTAL_TASKS_LOC);
-        batch_io_buffer_val = *(uint32_t *)(BATCH_IO_BUFFER_LOC);
-        g_batch_file_start_sector = *(short *)(BATCH_FILE_START_SECTOR_LOC); // tell cmd_write_batch where to write
+        bool in_batch_mode = *(bool *)(pa2kva(IN_BATCH_MODE_LOC));
+        int batch_task_index = *(short *)(pa2kva(BATCH_TASK_INDEX_LOC));
+        int batch_total_tasks = *(short *)(pa2kva(BATCH_TOTAL_TASKS_LOC));
+        batch_io_buffer_val = *(uint32_t *)(pa2kva(BATCH_IO_BUFFER_LOC));
+        g_batch_file_start_sector = *(short *)(pa2kva(BATCH_FILE_START_SECTOR_LOC)); // tell cmd_write_batch where to write
         kernel_batch_handler(in_batch_mode, batch_task_index, batch_total_tasks, batch_io_buffer_val);
 
         // Construct the message with color
@@ -448,16 +449,19 @@ int main(void)
         // Re-compete the lock
         lock_kernel();
 
+        // Disable temp mapping
+        disable_tmp_map();
+
         // Get current_running from macro
         pcb_t *current_running = CURRENT_RUNNING;
 
         // Print logo on startup
-        if (*(short *)(LOGO_HAS_PRINTED) == 0) {
+        if (*(short *)(pa2kva(LOGO_HAS_PRINTED)) == 0) {
             if (CONFIG_PRINT_LOGO) {
                 print_logo();
                 screen_move_cursor(current_running->cursor_x, current_running->cursor_y + 22);
             }
-            *(short *)(LOGO_HAS_PRINTED) = 1;
+            *(short *)(pa2kva(LOGO_HAS_PRINTED)) = 1;
         }
 
         // Unlock the lock, initialization is done
@@ -474,6 +478,7 @@ int main(void)
         run_command_loop();
 
     } else {
+
         // Set core_id to 1
         core_id = 1;
 
@@ -503,6 +508,9 @@ int main(void)
 
         // Enable global interrupt here
         enable_interrupt();
+
+        // Disable temp mapping
+        disable_tmp_map();
 
         // Unlock kernel
         unlock_kernel();

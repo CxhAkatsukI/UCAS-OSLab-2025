@@ -29,7 +29,8 @@ pcb_t pid0_pcb = {
     .user_sp = (ptr_t)pid0_stack,
     .cpu_mask = 0x3, // NOTE: We must ensure default programs can run on both cores
     .task_name = "Windows",
-    .status = TASK_BLOCKED
+    .status = TASK_BLOCKED,
+    .pgdir = 0xffffffc051000000 // pa2kva(PGDIR_PA)
 };
 
 // Default PCB, secondary core
@@ -39,7 +40,8 @@ pcb_t s_pid0_pcb = {
     .user_sp = (ptr_t)s_pid0_stack,
     .cpu_mask = 0x3,
     .task_name = "MS-DOS",
-    .status = TASK_BLOCKED
+    .status = TASK_BLOCKED,
+    .pgdir = 0xffffffc051000000 // pa2kva(PGDIR_PA)
 };
 
 LIST_HEAD(ready_queue);
@@ -208,8 +210,14 @@ void do_scheduler(void)
     if (next_running->pid > 0) next_running->on_cpu = core_id;
 
     // Log the decision made by the scheduler
-    klog("Scheduler on core %d picker task '%s' (PID %d) with mask 0x%x\n",
+    klog("Scheduler on core %d picked task '%s' (PID %d) with mask 0x%x\n",
          core_id, next_running->task_name, next_running->pid, next_running->cpu_mask);
+
+    // Switch Page Table!
+    // We need to convert the KVA of pgdir to PFN for satp.
+    // kva2pa(next_running->pgdir) >> 12
+    set_satp(SATP_MODE_SV39, next_running->pid, kva2pa(next_running->pgdir) >> NORMAL_PAGE_SHIFT);
+    local_flush_tlb_all();
 
     // [p2-task1] switch_to current_running
     switch_to(prev_running, CURRENT_RUNNING);
@@ -361,7 +369,7 @@ static const char *get_status_string(task_status_t status)
 void do_process_show()
 {
     bios_putstr(ANSI_FMT("[PROCESS TABLE]\n\r", ANSI_FG_GREEN));
-    bios_putstr(ANSI_FMT("PID   STATUS    KERNEL_SP     USER_SP       CPU    MASK    NAME\n\r", ANSI_FG_YELLOW));
+    bios_putstr(ANSI_FMT("PID   STATUS    KERNEL_SP             USER_SP        CPU    MASK    NAME\n\r", ANSI_FG_YELLOW));
     bios_putstr(ANSI_FG_CYAN);
 
     // Get current_running from macro
@@ -421,38 +429,106 @@ pid_t do_exec(char *name, int argc, char *argv[], uint64_t mask)
             new_pcb = &pcb[NUM_MAX_TASK - 1];
     }
 
+    // Set up Page Directory (VM)
+    // Alloc physical page for pgdir, get its KVA
+    uintptr_t pgdir = allocPage(1);
+    clear_pgdir(pgdir);
+    // Share Kernel Mapping (Copy kernel PGD to user PGD)
+    share_pgtable(pgdir, pa2kva(PGDIR_PA));
+    new_pcb->pgdir = pgdir;
+
+    // Map Task Code/Data
+    // This copies code from SD to the new physical pages mapped in pgdir
+    uint64_t entry_point = map_task(name, pgdir);
+    if (entry_point == 0) return 0; // Failed
+
     // Variable for the entry point of a program
-    ptr_t entry_point;
+    // ptr_t entry_point;
 
-    // If static loading is enabled, modify next_task_addr
-    if (CONFIG_STATIC_LOADING) {
-        next_task_addr = TASK_MEM_BASE + TASK_SIZE * task_idx;
-    }
+    // NOTE: This makes the following content is obsolete in virtual memory scenario
+    if (!CONFIG_VMEM_LOADING) {
 
-    // Check if the task has been loaded before
-    if (tasks[task_idx].load_address == 0) {
-        entry_point = load_task_img(tasks[task_idx].name, tasknum, next_task_addr);
+        // If static loading is enabled, modify next_task_addr
+        if (CONFIG_STATIC_LOADING) {
+            next_task_addr = TASK_MEM_BASE + TASK_SIZE * task_idx;
+        }
 
-        // Save the load address for future executions
-        tasks[task_idx].load_address = entry_point;
+        // Check if the task has been loaded before
+        if (tasks[task_idx].load_address == 0) {
+            entry_point = load_task_img(tasks[task_idx].name, tasknum, next_task_addr);
 
-        // Update the next available task address, page-aligned
-        next_task_addr += tasks[task_idx].byte_size;
-        next_task_addr = (next_task_addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+            // Save the load address for future executions
+            tasks[task_idx].load_address = entry_point;
 
-        // Log the operation
-        klog("First load of '%s' at address 0x%lx\n", tasks[task_idx].name, entry_point);
+            // Update the next available task address, page-aligned
+            next_task_addr += tasks[task_idx].byte_size;
+            next_task_addr = (next_task_addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+
+            // Log the operation
+            klog("First load of '%s' at address 0x%lx\n", tasks[task_idx].name, entry_point);
+        } else {
+            // Get the entry point from the saved load address
+            entry_point = tasks[task_idx].load_address;
+
+            // Log the operation
+            klog("Re-executing '%s' from address 0x%lx\n", tasks[task_idx].name, entry_point);
+        }
     } else {
-        // Get the entry point from the saved load address
-        entry_point = tasks[task_idx].load_address;
+        // The following logic will be adopted when virtual memory is implemented
 
-        // Log the operation
-        klog("Re-executing '%s' from address 0x%lx\n", tasks[task_idx].name, entry_point);
+        // Kernel Stack
+        new_pcb->kernel_stack_base = allocPage(KERNEL_STACK_PAGES);
+        new_pcb->kernel_sp = new_pcb->kernel_stack_base + PAGE_SIZE * KERNEL_STACK_PAGES;
+
+        // User Stack
+        // Allocate user stack page at USER_STACK_ADDR - PAGE_SIZE
+        uintptr_t user_stack_kva = alloc_page_helper(USER_STACK_ADDR - PAGE_SIZE, pgdir);
+
+        // Copy argv to the top of user stack
+        // Calculate total size needed
+        int total_len = 0;
+        for (int i = 0; i < argc; ++i) {
+            total_len += strlen(argv[i]) + 1;
+        }
+
+
+        // Pointers in KVA (to write data)
+        char *kva_top = (char*)(user_stack_kva + PAGE_SIZE);
+        char *kva_str_base = kva_top - total_len;
+        char **kva_argv_base = (char**)((kva_str_base) - (argc + 1) * sizeof(char *));
+
+        kva_argv_base = (char **)((unsigned long long)kva_argv_base & ~0xF);
+
+        uintptr_t offset_str = (uintptr_t)kva_str_base - user_stack_kva;
+        uintptr_t offset_argv = (uintptr_t)kva_argv_base - user_stack_kva;
+
+        // Pointers in User VA (to store in argv array)
+        uintptr_t uva_top = USER_STACK_ADDR;
+        uintptr_t uva_str_base = (uva_top - PAGE_SIZE) + offset_str;
+        uintptr_t uva_argv_base = (uva_top - PAGE_SIZE) + offset_argv;
+
+        // Copy strings
+        char *current_kva_str = kva_str_base;
+        uintptr_t current_uva_str = uva_str_base;
+
+        for (int i = 0; i < argc; ++i) {
+            strcpy(current_kva_str, argv[i]);
+            kva_argv_base[i] = (char*)current_uva_str; // Store User VA in the array
+            int len = strlen(argv[i]) + 1;
+            current_kva_str += len;
+            current_uva_str += len;
+        }
+        kva_argv_base[argc] = NULL;
+
+        // Calculate user_sp
+        new_pcb->user_sp = uva_argv_base;
+
+        // Context
+        init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, argc, (char **)new_pcb->user_sp, new_pcb);
     }
 
     // Initialize the PCB
     list_init(&new_pcb->wait_list);
-    new_pcb->kernel_sp = new_pcb->kernel_stack_base + KERNEL_STACK_PAGES * PAGE_SIZE; // allocation handled in init_pcb()
     new_pcb->pid = process_id++;
     new_pcb->task_name = tasks[task_idx].name;
     new_pcb->status = TASK_READY;
@@ -468,34 +544,40 @@ pid_t do_exec(char *name, int argc, char *argv[], uint64_t mask)
         new_pcb->cpu_mask = mask;
     }
 
-    // Tackle user_sp, copying actual string onto user stack
-    ptr_t user_stack_top = new_pcb->user_stack_base + USER_STACK_PAGES * PAGE_SIZE;
+    // NOTE: This makes the following content is obsolete in virtual memory scenario
+    if (!CONFIG_VMEM_LOADING) {
 
-    int total_len = 0;
-    for (int i = 0; i < argc; ++i) {
+        new_pcb->kernel_sp = new_pcb->kernel_stack_base + KERNEL_STACK_PAGES * PAGE_SIZE; // allocation handled in init_pcb()
+
+        // Tackle user_sp, copying actual string onto user stack
+        ptr_t user_stack_top = new_pcb->user_stack_base + USER_STACK_PAGES * PAGE_SIZE;
+
+        int total_len = 0;
+        for (int i = 0; i < argc; ++i) {
         total_len += strlen(argv[i]) + 1;
-    }
+        }
 
-    // Address for args string buffer and argv array
-    char *str_buf = (char *)user_stack_top - total_len;
-    char *current_str = str_buf;
-    char **new_argv = (char **)(current_str - (argc + 1) * sizeof(char *));
+        // Address for args string buffer and argv array
+        char *str_buf = (char *)user_stack_top - total_len;
+        char *current_str = str_buf;
+        char **new_argv = (char **)(current_str - (argc + 1) * sizeof(char *));
 
-    for (int i = 0; i < argc; ++i) {
+        for (int i = 0; i < argc; ++i) {
         strcpy(current_str, argv[i]);
         new_argv[i] = current_str;
         current_str += strlen(argv[i]) + 1;
+        }
+        new_argv[argc] = NULL;
+
+        // AAlign the final stack pointer to a 16-byte boundary
+        ptr_t final_user_stack = (ptr_t)new_argv & ~0xF;
+
+        // Set the new_pcb's user stack pointer
+        new_pcb->user_sp = final_user_stack;
+
+        // Initialize the fake context on the stack
+        init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, argc, new_argv, new_pcb);
     }
-    new_argv[argc] = NULL;
-
-    // AAlign the final stack pointer to a 16-byte boundary
-    ptr_t final_user_stack = (ptr_t)new_argv & ~0xF;
-
-    // Set the new_pcb's user stack pointer
-    new_pcb->user_sp = final_user_stack;
-
-    // Initialize the fake context on the stack
-    init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, argc, new_argv, new_pcb);
 
     // Add the initialized PCB to the ready queue
     list_add_tail(&new_pcb->list, &ready_queue);
@@ -512,6 +594,10 @@ void do_exit(void)
 
     // Mark the current process as exited
     current_running->status = TASK_EXITED;
+
+    // Switch back to Kernel Page Table safely before releasing resources
+    set_satp(SATP_MODE_SV39, 0, PGDIR_PA >> NORMAL_PAGE_SHIFT);
+    local_flush_tlb_all();
 
     // Unblock any waiting parent
     if (!list_is_empty(&current_running->wait_list)) {
@@ -580,6 +666,9 @@ int do_kill(pid_t pid)
         list_del(&target_pcb->list);
     }
 
+    // Free resources
+    free_all_pages(target_pcb);
+
     // Unblock any parent process waiting on this PID in waitpid.
     if (!list_is_empty(&target_pcb->wait_list)) {
         pcb_t *parent = list_entry(target_pcb->wait_list.next, pcb_t, list);
@@ -620,6 +709,10 @@ int do_waitpid(pid_t pid)
     // Check child's status
     if (child_pcb->status == TASK_EXITED) {
         // Reap the zombie process
+
+        // Free memory resources here
+        free_all_pages(child_pcb);
+
         // For now, we'll just clear the PCB to make it reusable
         child_pcb->pid = 0;
         child_pcb->status = TASK_EXITED; // Set to exited to indicate it's free

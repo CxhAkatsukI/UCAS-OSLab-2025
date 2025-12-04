@@ -13,6 +13,7 @@ typedef struct {
 // Command handlers
 int cmd_ls(char *args);
 int cmd_exec(char *args);
+int cmd_vexec(char *args);
 int cmd_help(char *args);
 int cmd_write_batch(char *args);
 int cmd_exec_batch(char *args);

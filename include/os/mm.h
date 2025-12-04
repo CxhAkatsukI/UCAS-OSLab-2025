@@ -28,13 +28,14 @@
 
 #include <type.h>
 #include <pgtable.h>
+#include <os/sched.h>
 
 #define MAP_KERNEL 1
 #define MAP_USER 2
 #define MEM_SIZE 32
 #define PAGE_SIZE 4096 // 4K
-#define INIT_KERNEL_STACK 0xffffffc052000000
-#define S_INIT_KERNEL_STACK 0x50600000
+#define INIT_KERNEL_STACK 0xffffffc050500000
+#define S_INIT_KERNEL_STACK 0xffffffc050600000
 #define INIT_USER_STACK 0x52500000
 #define FREEMEM_KERNEL (INIT_KERNEL_STACK+PAGE_SIZE)
 #define FREEMEM_USER INIT_USER_STACK
@@ -50,6 +51,7 @@ extern void freeUserPage(ptr_t baseAddr);
 extern ptr_t allocPage(int numPage);
 // TODO [P4-task1] */
 void freePage(ptr_t baseAddr);
+void free_all_pages(pcb_t *pcb);
 
 // #define S_CORE
 // NOTE: only need for S-core to alloc 2MB large page

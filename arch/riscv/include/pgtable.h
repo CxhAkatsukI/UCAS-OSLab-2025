@@ -1,6 +1,7 @@
 #ifndef PGTABLE_H
 #define PGTABLE_H
 
+#include "os/string.h"
 #include <type.h>
 
 #define SATP_MODE_SV39 8
@@ -70,48 +71,75 @@ static inline void set_satp(
 #define PPN_BITS 9lu
 #define NUM_PTE_ENTRY (1 << PPN_BITS)
 
+#define KVA_OFFSET 0xffffffc000000000lu
+
 typedef uint64_t PTE;
+
+/* Disable temp mapping */
+void disable_tmp_map(void);
 
 /* Translation between physical addr and kernel virtual addr */
 static inline uintptr_t kva2pa(uintptr_t kva)
 {
     /* TODO: [P4-task1] */
+    // Subtract the kernel offset to get physical address
+    return kva - KVA_OFFSET;
 }
 
 static inline uintptr_t pa2kva(uintptr_t pa)
 {
     /* TODO: [P4-task1] */
+    // Add the kernel offset to get kernel virtual address
+    return pa + KVA_OFFSET;
 }
 
 /* get physical page addr from PTE 'entry' */
 static inline uint64_t get_pa(PTE entry)
 {
     /* TODO: [P4-task1] */
+    // Extract PFN (bits 53:10) and convert to physical address (shift left 12)
+    // Mask ((1lu << 44) - 1) ensures we only take 44 bis of PFN
+    return ((entry >> _PAGE_PFN_SHIFT) & ((1lu << 44) - 1)) << NORMAL_PAGE_SHIFT;
 }
 
 /* Get/Set page frame number of the `entry` */
 static inline long get_pfn(PTE entry)
 {
     /* TODO: [P4-task1] */
+    // Just extract the PFN
+    return (entry >> _PAGE_PFN_SHIFT) & ((1lu << 44) - 1);
 }
+
 static inline void set_pfn(PTE *entry, uint64_t pfn)
 {
     /* TODO: [P4-task1] */
+    // 1. Clear the old PFN bits
+    *entry &= ~((((1lu << 44) - 1)) << _PAGE_PFN_SHIFT);
+    // 2. Set the new PFN
+    *entry |= (pfn & ((1lu << 44) - 1)) << _PAGE_PFN_SHIFT;
 }
 
 /* Get/Set attribute(s) of the `entry` */
 static inline long get_attribute(PTE entry, uint64_t mask)
 {
     /* TODO: [P4-task1] */
+    return entry & mask;
 }
+
 static inline void set_attribute(PTE *entry, uint64_t bits)
 {
     /* TODO: [P4-task1] */
+    // Clear the lower 10 bits (attributes)
+    *entry &= ~((1lu << _PAGE_PFN_SHIFT) - 1);
+    // Set the new attributes
+    *entry |= bits & ((1lu << _PAGE_PFN_SHIFT) - 1);
 }
 
 static inline void clear_pgdir(uintptr_t pgdir_addr)
 {
     /* TODO: [P4-task1] */
+    // A page is 4KB. A PTE is 8 bytes. 4096 / 8 = 512 entries.
+    bzero((void *)pgdir_addr, NORMAL_PAGE_SIZE);
 }
 
 #endif  // PGTABLE_H

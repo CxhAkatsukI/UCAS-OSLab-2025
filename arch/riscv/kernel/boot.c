@@ -73,11 +73,46 @@ int ARRTIBUTE_BOOTKERNEL boot_kernel(unsigned long mhartid)
     if (mhartid == 0) {
         setup_vm();
     } else {
+        // map boot address
+        for (uint64_t pa = 0x50000000lu; pa < 0x51000000lu;
+            pa += 0x200000lu) {
+            map_page(pa, pa, (PTE *)PGDIR_PA);
+        }
         enable_vm();
     }
 
     /* enter kernel */
-    ((kernel_entry_t)pa2kva(_start))(mhartid);
+    ((kernel_entry_t)pa2kva((uintptr_t)_start))(mhartid);
 
     return 0;
+}
+
+void disable_tmp_map(void)
+{
+    // Get the kernel's Page Directory
+    PTE *pgdir = (PTE *)pa2kva(PGDIR_PA);
+
+    // Loop through the virtual address range 0x50000000 to 0x51000000
+    // Step size is 2MB (0x200000) because these were mapped as Large Pages
+    for (uint64_t va = 0x50000000lu; va < 0x51000000lu; va += 0x200000lu) {
+        // Mask the VA to ensure it's valid for calculation
+        uint64_t va_masked = va & VA_MASK;
+
+        // Calculate VPN2 (Level 2 index)
+        uint64_t vpn2 = va_masked >> (NORMAL_PAGE_SHIFT + PPN_BITS + PPN_BITS);
+
+        // Calculate VPN1 (Level 1 index)
+        // This logic matches the 'map_page' logic in boot.c
+        uint64_t vpn1 = (vpn2 << PPN_BITS) ^ 
+                        (va_masked >> (NORMAL_PAGE_SHIFT + PPN_BITS));
+
+        // Get the PMD (Page Middle Directory) table from the PGD
+        PTE *pmd = (PTE *)pa2kva(get_pa(pgdir[vpn2]));
+
+        // Zero out the entry (Remove the mapping)
+        pmd[vpn1] = 0;
+    }
+
+    // Flush the TLB to ensure the CPU updates its cached translations
+    local_flush_tlb_all();
 }

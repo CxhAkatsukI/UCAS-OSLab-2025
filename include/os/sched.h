@@ -101,6 +101,9 @@ typedef struct pcb
     uint64_t cpu_mask; // A bitmap of allowed CPUs
     int on_cpu;        // Which CPU the task is running on
 
+    /* Vritual Memory */
+    uintptr_t pgdir;
+
     /* process name */
     char *task_name;
 

@@ -3,7 +3,7 @@
 
 #include <type.h>
 
-#define TASK_MEM_BASE    0x52000000
+#define TASK_MEM_BASE    0xffffffc052000000
 #define TASK_MAXNUM      32
 #define TASK_SIZE        0x10000
 #define USER_STACKPTR    (TASK_MEM_BASE + TASK_SIZE)
@@ -22,6 +22,9 @@
 #define SECTOR_SIZE 512
 #define MAX_BATCH_TASKS 16
 
+#define TMP_MEM_BASE     0x59000000
+#define USER_ENTRYPOINT  0x10000
+
 // Helper macro to make sure the logo only print once
 #define LOGO_HAS_PRINTED (BOOT_LOADER_SIG_OFFSET - 16)
 
@@ -31,10 +34,12 @@
 typedef struct {
     char name[MAX_NAME_LEN];
     uint16_t start_sector;
-    uint16_t size;
+    uint16_t size; // Sector size
     uint32_t byte_offset;
-    uint32_t byte_size;
+    uint32_t byte_size; // Num of bytes
     ptr_t load_address;
+    uint32_t task_size; // File size
+    uint32_t p_memsz;
 } task_info_t;
 
 // extern task array

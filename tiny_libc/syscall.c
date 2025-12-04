@@ -296,4 +296,25 @@ void sys_thread_create(void (*func)(void *), void *arg)
 {
     invoke_syscall(SYSCALL_THREAD_CREATE, (long)func, (long)arg, 0, 0, 0);
 }
+
+size_t sys_free_mem(void)
+{
+    return invoke_syscall(SYSCALL_FREE_MEM, 0, 0, 0, 0, 0);
+}
+
+int sys_pipe_open(const char *name)
+{
+    return invoke_syscall(SYSCALL_PIPE_OPEN, (long)name, 0, 0, 0, 0);
+}
+
+long sys_pipe_give_pages(int pipe_idx, void *src, size_t length)
+{
+    return invoke_syscall(SYSCALL_PIPE_GIVE, (long)pipe_idx, (long)src, (long)length, 0, 0);
+}
+
+long sys_pipe_take_pages(int pipe_idx, void *dst, size_t length)
+{
+    return invoke_syscall(SYSCALL_PIPE_TAKE, (long)pipe_idx, (long)dst, (long)length, 0, 0);
+}
+
 /************************************************************/

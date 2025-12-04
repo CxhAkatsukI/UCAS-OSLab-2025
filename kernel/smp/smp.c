@@ -33,9 +33,9 @@ void lock_kernel()
     /* TODO: P3-TASK3 multicore*/
 
     // Acquire the BKL
-    // klog("Attempting to acquire BKL\n");
+    klog("Attempting to acquire BKL\n");
     spin_lock_acquire(&kernel_lock);
-    // klog("...BKL Acquired.\n");
+    klog("...BKL Acquired.\n");
 
 }
 
@@ -44,7 +44,7 @@ void unlock_kernel()
     /* TODO: P3-TASK3 multicore*/
 
     // Release the BKL
-    // klog("Releasing BKL\n");
+    klog("Releasing BKL\n");
     spin_lock_release(&kernel_lock);
 
 }

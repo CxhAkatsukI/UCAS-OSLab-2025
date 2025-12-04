@@ -6,8 +6,9 @@
 #include <asm.h>
 #include <csr.h>
 
-#define KERNEL_STACK		0x50500000
-#define S_KERNEL_STACK      0x50600000
+// The kernel is now running in virtual address space
+#define KERNEL_STACK        0xffffffc050500000
+#define S_KERNEL_STACK      0xffffffc050600000
 
 .section ".entry_function","ax"
 ENTRY(_start)
@@ -47,7 +48,7 @@ ENTRY(_start)
   s_start:
 
   // Set up the stack pointer
-  la sp, S_KERNEL_STACK
+  li sp, S_KERNEL_STACK
 
   // Set up the thread pointer to point to cpu_table[1]
   la tp, cpu_table

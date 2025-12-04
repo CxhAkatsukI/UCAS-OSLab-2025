@@ -3,6 +3,7 @@
 #include "os/sched.h"
 #include "os/smp.h"
 #include "os/time.h"
+#include "pgtable.h"
 #include "screen.h"
 #include <os/mm.h>
 #include <common.h>
@@ -32,6 +33,7 @@ command_t cmd_table[] = {
     {"help", "Display information about all supported commands", cmd_help},
     {"ls", "List all loaded applications", cmd_ls},
     {"exec", "Execute a task by name or ID", cmd_exec},
+    {"vexec", "Execute a task by name or ID with virtual memory on", cmd_vexec},
     {"write_batch", "Write a batch processing sequence to image", cmd_write_batch},
     {"exec_batch", "Execute the stored batch processing sequence", cmd_exec_batch},
     {"wrq", "(W)rite programs into (r)eady (q)ueue.", cmd_wrq},
@@ -519,8 +521,8 @@ int cmd_exec_batch(char *args) {
     in_batch_mode = true;
     batch_current_task_idx = 0;
     *(bool *)(IN_BATCH_MODE_LOC) = true;
-    *(short *)(BATCH_TASK_INDEX_LOC) = 0;
-    *(short *)(BATCH_TOTAL_TASKS_LOC) = batch_total_tasks;
+    *(short *)(pa2kva(BATCH_TASK_INDEX_LOC)) = 0;
+    *(short *)(pa2kva(BATCH_TOTAL_TASKS_LOC)) = batch_total_tasks;
 
     bios_putstr(ANSI_FMT("Info: Starting batch execution...\n\r", ANSI_FG_BLUE));
 
@@ -580,7 +582,7 @@ void kernel_batch_handler(bool in_batch_mode, int batch_current_task_idx, int ba
             bios_putstr(ANSI_FMT("\n\r", ANSI_NONE));
 
             // Update the persistent batch state in the memory-mapped region
-            *(short *)(BATCH_TASK_INDEX_LOC) = batch_current_task_idx;
+            *(short *)(pa2kva(BATCH_TASK_INDEX_LOC)) = batch_current_task_idx;
 
             // Use inline assembly to set the a0 register. In RISC-V, a0 is used
             // for the first argument to a function and for its return value.
@@ -608,8 +610,8 @@ void kernel_batch_handler(bool in_batch_mode, int batch_current_task_idx, int ba
 
             // Reset all persistent batch state variables in the memory-mapped region
             *(bool *)(IN_BATCH_MODE_LOC) = false;
-            *(short *)(BATCH_TASK_INDEX_LOC) = 0;
-            *(short *)(BATCH_TOTAL_TASKS_LOC) = 0;
+            *(short *)(pa2kva(BATCH_TASK_INDEX_LOC)) = 0;
+            *(short *)(pa2kva(BATCH_TOTAL_TASKS_LOC)) = 0;
 
             // Print the return value out
             char temp_buf[] = "_____";
@@ -806,6 +808,74 @@ int cmd_twrq(char *args) {
     bios_putstr("\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r");
     bios_putstr("\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r");
     bios_putstr("\n\r\n\r\n\r");
+    screen_clear();
+    screen_reflush();
+
+    // Set the FIRST interrupt to kick things off
+    bios_set_timer(get_ticks() + TIMER_INTERVAL);
+
+    // Enable global interrupt here
+    enable_interrupt();
+
+    unlock_kernel();
+
+    // --- Interrupt driven idle loop ---
+    while (1) {
+        enable_preempt();
+        asm volatile("wfi");
+    }
+
+    return 0;
+}
+
+/**
+ * @brief Command handler to execute the first user program with virtual memory enabled.
+ *
+ * This command initializes PCBs for each specified task and adds them
+ * to the ready queue for scheduling.
+ *
+ * @param args A space-separated string of task names to load into the ready queue.
+ * @return Always returns 0.
+ */
+int cmd_vexec(char *args)
+{
+    // 1. Check for empty input
+    if (args == NULL || *args == '\0') {
+        bios_putstr(ANSI_FMT("ERROR: Usage: exec <task_name> [args...]", ANSI_BG_RED));
+        bios_putstr(ANSI_FMT("\n\r", ANSI_NONE));
+        return 0;
+    }
+
+    // 2. Parse arguments
+    // We expect MAX_BATCH_TASKS to be a constant defining max args (e.g., 16)
+    // and MAX_NAME_LEN to define max string length.
+    char parsed_args[MAX_BATCH_TASKS][MAX_NAME_LEN];
+    int argc = tokenize_string(args, parsed_args, MAX_BATCH_TASKS);
+
+    if (argc <= 0) {
+        return 0;
+    }
+
+    // 3. Construct argv array for do_exec
+    // do_exec expects an array of char* pointers, not a 2D array of chars.
+    char *argv[MAX_BATCH_TASKS];
+    for (int i = 0; i < argc; ++i) {
+        argv[i] = parsed_args[i];
+    }
+    argv[argc] = NULL; // Null-terminate the list of arguments
+
+    // 4. Execute the task
+    bios_putstr(ANSI_FMT("Info: Executing task: ", ANSI_FG_BLUE));
+    bios_putstr(argv[0]);
+    bios_putstr(ANSI_FMT("\n\r", ANSI_NONE));
+
+    // Call the system's process creation function
+    // 0 passed as mask usually implies "inherit mask" or "use default"
+    pid_t pid = do_exec(argv[0], argc, argv, 0); 
+
+    bios_putstr(ANSI_FMT("Info: Starting scheduler...\n\r", ANSI_FG_GREEN));
+
+    // Enough newlines to clear the screen
     screen_clear();
     screen_reflush();
 
