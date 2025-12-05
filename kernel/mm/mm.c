@@ -1,8 +1,11 @@
-#include <os/mm.h>
-#include <os/string.h>
-#include <printk.h>
 #include <assert.h>
+#include <os/debug.h>
+#include <os/kernel.h>
+#include <os/mm.h>
+#include <os/sched.h>
+#include <os/string.h>
 #include <pgtable.h>
+#include <printk.h>
 
 static ptr_t kernMemCurr = FREEMEM_KERNEL;
 static ptr_t userMemCurr = FREEMEM_USER; // WARNING: Obsoleted
@@ -16,6 +19,14 @@ static ptr_t userMemCurr = FREEMEM_USER; // WARNING: Obsoleted
 #define BITMAP_OFFSET(addr) (((addr - KERNELMEM_START) / PAGE_SIZE) % 8)
 
 static uint8_t page_bitmap[TOTAL_PAGES / 8]; // Bitmap to track free pages
+
+// Mem-related data definitions
+alloc_info_t alloc_info[USER_PAGE_MAX_NUM];
+LIST_HEAD(in_mem_list);
+LIST_HEAD(swap_out_list);
+LIST_HEAD(free_list);
+
+int page_cnt = 0; // Current number of physical pages used
 
 // WARNING: Obsoleted logic
 ptr_t allocKernelPage(int numPage)
@@ -206,6 +217,173 @@ uintptr_t alloc_page_helper(uintptr_t va, uintptr_t pgdir)
                         _PAGE_EXEC | _PAGE_ACCESSED | _PAGE_DIRTY | _PAGE_USER | _PAGE_GLOBAL);
 
     // Return KVA of the physical page so the kernel can write to it
+    return pa2kva(get_pa(pte[vpn0]));
+}
+
+// Helper to get PCB index
+static inline int get_pgdir_id(uintptr_t pgdir)
+{
+    for (int i = 0; i < NUM_MAX_TASK; i++) {
+        if (pgdir == pcb[i].pgdir) return i;
+    }
+    return -1;
+}
+
+// Initialize swap manager
+void init_swp_mgr(void)
+{
+    page_cnt = 0;
+    for (int i = 0; i < USER_PAGE_MAX_NUM; i++) {
+        list_add_tail(&alloc_info[i].lnode, &free_list);
+        alloc_info[i].uva = 0;
+        alloc_info[i].pa = 0;
+        alloc_info[i].on_disk_sec = 0;
+        alloc_info[i].pgdir_id = 0;
+    }
+}
+
+// Core Function: Swap Out a Victim Page (FIFO)
+alloc_info_t* swapPage(void) {
+    // 1. Pick victim: Head of in_mem_list (First In)
+    list_node_t *victim_node = in_mem_list.next;
+    alloc_info_t *info = list_entry(victim_node, alloc_info_t, lnode);
+
+    // 2. Move to swap_out_list
+    list_del(victim_node);
+    list_add_tail(victim_node, &swap_out_list);
+
+    // 3. Write to Disk
+    // info->pa is the physical address. We write 4KB (8 sectors).
+    bios_sd_write(info->pa, 8, image_end_sec);
+    klog("Swapping memory at 0x%lx onto disk\n", info->pa);
+    info->on_disk_sec = image_end_sec;
+    image_end_sec += 8; // Advance swap pointer (simple append-only log)
+
+    // 4. Invalidate Page Table Entry
+    // We must ensure the CPU traps (Page Fault) if this address is accessed again.
+    uintptr_t pgdir = pcb[info->pgdir_id].pgdir;
+    
+    // Manually walk to clear the entry
+    uint64_t va = info->uva;
+    uint64_t vpn2 = (va >> 30) & 0x1FF;
+    uint64_t vpn1 = (va >> 21) & 0x1FF;
+    uint64_t vpn0 = (va >> 12) & 0x1FF;
+    
+    PTE *pgd = (PTE *)pgdir;
+    PTE *pmd = (PTE *)pa2kva(get_pa(pgd[vpn2]));
+    PTE *pte = (PTE *)pa2kva(get_pa(pmd[vpn1]));
+    
+    // Clear the Present bit (make it 0)
+    pte[vpn0] = 0; 
+
+    // 5. Clean up Physical Memory
+    // Clear the physical page content so the new owner gets a clean page
+    clear_pgdir(pa2kva(info->pa)); 
+    
+    // Flush TLB to ensure CPU sees the invalidation
+    local_flush_tlb_all();
+
+    return info;
+}
+
+// Allocation with Swap Logic
+ptr_t uva_allocPage(int numPage, uintptr_t uva)
+{
+    int current_id = get_pgdir_id(CURRENT_RUNNING->pgdir);
+
+    // Case 1: Is this address swapped out? (Swap In)
+    for (list_node_t *node = swap_out_list.next; node != &swap_out_list; node = node->next) {
+
+        alloc_info_t *info = list_entry(node, alloc_info_t, lnode);
+        
+        if (info->uva == uva && info->pgdir_id == current_id) {
+            // Found it on disk!
+            
+            // We need a physical page. Is memory full?
+            // Reuse a physical page by swapping someone else out
+            alloc_info_t *victim = swapPage(); 
+            info->pa = victim->pa; // Steal the physical address
+
+            // Move info node back to in_mem_list
+            list_del(&info->lnode);
+            list_add_tail(&info->lnode, &in_mem_list);
+
+            // Read data back from disk
+            klog("Swapping memory at 0x%lx into RAM\n", info->pa);
+            bios_sd_read(info->pa, 8, info->on_disk_sec);
+            info->on_disk_sec = 0;
+
+            // Return the KVA of the restored page
+            return pa2kva(info->pa);
+        }
+    }
+
+    // Case 2: New Allocation (Fresh Page)
+    // Get a tracker node
+    if (list_is_empty(&free_list)) {
+        // Handle error: no more tracking nodes
+        return 0; 
+    }
+    alloc_info_t *new_info = list_entry(free_list.next, alloc_info_t, lnode);
+    list_del(&new_info->lnode);
+    list_add_tail(&new_info->lnode, &in_mem_list);
+    
+    new_info->uva = uva;
+    new_info->pgdir_id = current_id;
+
+    // Check Memory Limit
+    if (page_cnt >= KERN_PAGE_MAX_NUM) {
+        // Memory full: Swap someone out to make room
+        alloc_info_t *victim = swapPage();
+        new_info->pa = victim->pa; // Reuse physical page
+    } else {
+        // Memory available: Allocate fresh physical page
+        page_cnt++;
+        new_info->pa = kva2pa(allocPage(1));
+    }
+
+    return pa2kva(new_info->pa);
+}
+
+// Modified Page Helper that uses uva_allocPage
+uintptr_t alloc_limit_page_helper(uintptr_t va, uintptr_t pgdir) {
+    va &= VA_MASK;
+    uint64_t vpn2 = va >> (NORMAL_PAGE_SHIFT + PPN_BITS + PPN_BITS);
+    uint64_t vpn1 = (vpn2 << PPN_BITS) ^ (va >> (NORMAL_PAGE_SHIFT + PPN_BITS));
+    uint64_t vpn0 = (vpn2 << (PPN_BITS + PPN_BITS)) ^ (vpn1 << PPN_BITS) ^ (va >> NORMAL_PAGE_SHIFT);
+
+    PTE *pgd = (PTE *)pgdir;
+    // ... (Allocate PGD/PMD as normal if missing) ...
+    if (pgd[vpn2] == 0) {
+        set_pfn(&pgd[vpn2], kva2pa(allocPage(1)) >> NORMAL_PAGE_SHIFT);
+        set_attribute(&pgd[vpn2], _PAGE_PRESENT);
+        clear_pgdir(pa2kva(get_pa(pgd[vpn2])));
+    }
+    PTE *pmd = (PTE *)pa2kva(get_pa(pgd[vpn2]));
+    if (pmd[vpn1] == 0) {
+        set_pfn(&pmd[vpn1], kva2pa(allocPage(1)) >> NORMAL_PAGE_SHIFT);
+        set_attribute(&pmd[vpn1], _PAGE_PRESENT);
+        clear_pgdir(pa2kva(get_pa(pmd[vpn1])));
+    }
+
+    PTE *pte = (PTE *)pa2kva(get_pa(pmd[vpn1]));
+
+    // Check Leaf PTE
+    if (pte[vpn0] == 0) {
+        // Entry missing: Either new allocation or swapped out
+        // uva_allocPage handles both cases!
+        uintptr_t aligned_va = (va >> NORMAL_PAGE_SHIFT) << NORMAL_PAGE_SHIFT;
+        ptr_t kva = uva_allocPage(1, aligned_va);
+        
+        // Map it
+        set_pfn(&pte[vpn0], kva2pa(kva) >> NORMAL_PAGE_SHIFT);
+        set_attribute(&pte[vpn0], _PAGE_PRESENT | _PAGE_READ | _PAGE_WRITE |
+                                  _PAGE_EXEC | _PAGE_ACCESSED | _PAGE_DIRTY | _PAGE_USER | _PAGE_GLOBAL);
+    } else {
+        // If PTE is present but we got here, it might be a permission issue,
+        // or a race condition. For this lab, assume it's fine or handle permissions.
+    }
+
     return pa2kva(get_pa(pte[vpn0]));
 }
 

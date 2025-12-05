@@ -26,6 +26,8 @@
 #define IN_BATCH_MODE_LOC (BOOT_LOADER_SIG_OFFSET - 12)
 #define BATCH_TASK_INDEX_LOC (BOOT_LOADER_SIG_OFFSET - 14)
 #define BATCH_TOTAL_TASKS_LOC (BOOT_LOADER_SIG_OFFSET - 16)
+#define SWAP_START_LOC (BOOT_LOADER_SIG_OFFSET - 18)
+#define SD_SWAP_SIZE (128 * 1024 * 1024 / 512) // 128 MB in sectors
 #define BATCH_FILE_SIZE_SECTORS 2
 #define BOOT_LOADER_SIG_1 0x55
 #define BOOT_LOADER_SIG_2 0xaa
@@ -242,6 +244,17 @@ static void create_image(int nfiles, char *files[])
 
     // 6. Write all metadata back into the boot sector
     write_img_info(nbytes_kernel, tasknum, task_info_start_sector, batch_file_start_sector, img);
+
+    // 7. Mark the starting sector for the swap area
+    int swap_start_sector = batch_file_start_sector + BATCH_FILE_SIZE_SECTORS + 1;
+
+    // 8. Write this value to the bootblock header
+    fseek(img, SWAP_START_LOC, SEEK_SET);
+    fwrite(&swap_start_sector, sizeof(int), 1, img);
+
+    // 9. Pad the image with zeros to reserve swap space on the disk
+    fseek(img, phyaddr, SEEK_SET);
+    write_padding(img, &phyaddr, (swap_start_sector + SD_SWAP_SIZE) * SECTOR_SIZE);
 
     fclose(img);
 }

@@ -1,16 +1,18 @@
-#include "os/smp.h"
-#include "sys/syscall.h"
-#include <csr.h>
 #include <asm/unistd.h>
+#include <assert.h>
+#include <csr.h>
 #include <os/debug.h>
 #include <os/irq.h>
-#include <os/time.h>
-#include <os/sched.h>
-#include <os/string.h>
 #include <os/kernel.h>
+#include <os/mm.h>
+#include <os/sched.h>
+#include <os/smp.h>
+#include <os/string.h>
+#include <os/time.h>
+#include <pgtable.h>
 #include <printk.h>
-#include <assert.h>
 #include <screen.h>
+#include <sys/syscall.h>
 
 handler_t irq_table[IRQC_COUNT];
 handler_t exc_table[EXCC_COUNT];
@@ -21,7 +23,9 @@ void interrupt_helper(regs_context_t *regs, uint64_t stval, uint64_t scause)
     // call corresponding handler by the value of `scause`
     uint64_t exc_code = scause & (~SCAUSE_IRQ_FLAG);
     if ((scause & SCAUSE_IRQ_FLAG) > 0) {
-        klog("IRQ received, code: %d\n", exc_code); // Log the IRQ code
+        int disable_print = (exc_code == IRQC_S_TIMER);
+        if (!disable_print)
+            klog("IRQ received, code: %d\n", exc_code); // Log the IRQ code
         ((handler_t)irq_table[exc_code])(regs, stval, scause);
     } else {
         int syscall_num = regs->regs[17];
@@ -42,15 +46,36 @@ void handle_irq_timer(regs_context_t *regs, uint64_t stval, uint64_t scause)
     do_scheduler();
 }
 
+void handle_page_fault(regs_context_t *regs, uint64_t stval, uint64_t scause)
+{
+    // Get the faulting address from stval
+    uintptr_t va = stval;
+
+    // TODO: Validate the address (Optional ?)
+
+    // Get the current running PCB
+    pcb_t *current_running = CURRENT_RUNNING;
+
+    // Allocate a physical page and map it
+    // alloc_page_helper(va, current_running->pgdir);
+    alloc_limit_page_helper(va, current_running->pgdir);
+
+    // Flush TLB (for this specific address)
+    local_flush_tlb_page(va);
+}
+
 void init_exception()
 {
     /* TODO: [p2-task3] initialize exc_table */
     /* NOTE: handle_syscall, handle_other, etc.*/
-    exc_table[EXCC_SYSCALL] = (handler_t)&handle_syscall;
+    exc_table[EXCC_SYSCALL]          = (handler_t)&handle_syscall;
+    exc_table[EXCC_INST_PAGE_FAULT]  = (handler_t)&handle_page_fault;
+    exc_table[EXCC_LOAD_PAGE_FAULT]  = (handler_t)&handle_page_fault;
+    exc_table[EXCC_STORE_PAGE_FAULT] = (handler_t)&handle_page_fault;
 
     /* TODO: [p2-task4] initialize irq_table */
     /* NOTE: handle_int, handle_other, etc.*/
-    irq_table[IRQC_S_TIMER] = (handler_t)&handle_irq_timer;
+    irq_table[IRQC_S_TIMER]          = (handler_t)&handle_irq_timer;
 
     /* TODO: [p2-task3] set up the entrypoint of exceptions */
     setup_exception();

@@ -210,8 +210,8 @@ void do_scheduler(void)
     if (next_running->pid > 0) next_running->on_cpu = core_id;
 
     // Log the decision made by the scheduler
-    klog("Scheduler on core %d picked task '%s' (PID %d) with mask 0x%x\n",
-         core_id, next_running->task_name, next_running->pid, next_running->cpu_mask);
+    // klog("Scheduler on core %d picked task '%s' (PID %d) with mask 0x%x\n",
+    //      core_id, next_running->task_name, next_running->pid, next_running->cpu_mask);
 
     // Switch Page Table!
     // We need to convert the KVA of pgdir to PFN for satp.

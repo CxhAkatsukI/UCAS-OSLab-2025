@@ -142,4 +142,25 @@ static inline void clear_pgdir(uintptr_t pgdir_addr)
     bzero((void *)pgdir_addr, NORMAL_PAGE_SIZE);
 }
 
+// Helper: Get the Kernel Virtual Address (KVA) corresponding to a User Virtual Address (VA)
+// Returns 0 if mapping does not exist.
+static inline uintptr_t get_kva_of(uintptr_t va, uintptr_t pgdir_va)
+{
+    va &= VA_MASK;
+    uint64_t vpn2 = va >> (NORMAL_PAGE_SHIFT + PPN_BITS + PPN_BITS);
+    uint64_t vpn1 = (vpn2 << PPN_BITS) ^ (va >> (NORMAL_PAGE_SHIFT + PPN_BITS));
+    uint64_t vpn0 = (vpn2 << (PPN_BITS + PPN_BITS)) ^ (vpn1 << PPN_BITS) ^ (va >> NORMAL_PAGE_SHIFT);
+
+    PTE *pgd = (PTE *)pgdir_va;
+    if ((pgd[vpn2] & _PAGE_PRESENT) == 0) return 0;
+
+    PTE *pmd = (PTE *)pa2kva(get_pa(pgd[vpn2]));
+    if ((pmd[vpn1] & _PAGE_PRESENT) == 0) return 0;
+
+    PTE *pte = (PTE *)pa2kva(get_pa(pmd[vpn1]));
+    if ((pte[vpn0] & _PAGE_PRESENT) == 0) return 0;
+
+    return pa2kva(get_pa(pte[vpn0]));
+}
+
 #endif  // PGTABLE_H

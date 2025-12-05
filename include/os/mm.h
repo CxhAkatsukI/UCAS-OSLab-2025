@@ -40,6 +40,32 @@
 #define FREEMEM_KERNEL (INIT_KERNEL_STACK+PAGE_SIZE)
 #define FREEMEM_USER INIT_USER_STACK
 
+// TODO: [P4-Task3] Swap Constants
+extern uint64_t image_end_sec;
+
+// Limits for the replacement algorithm
+#define USER_PAGE_MAX_NUM 512  // Max pages to track per user
+#define KERN_PAGE_MAX_NUM 4    // Artificial limit: Only 4 physical pages allowed in memory!
+
+// Structure to track page allocation info
+typedef struct {
+    list_node_t lnode;    // Linked list node for FIFO queue
+    uintptr_t uva;        // User Virtual Address
+    uintptr_t pa;         // Physical Address (currently assigned)
+    int on_disk_sec;      // Sector index on disk (if swapped out)
+    int pgdir_id;         // Owner process ID (to distinguish shared pages)
+} alloc_info_t;
+
+// Global Arrays and Lists for Page Swapping
+extern alloc_info_t alloc_info[USER_PAGE_MAX_NUM];
+extern list_head in_mem_list;   // Pages currently in memory (FIFO queue)
+extern list_head swap_out_list; // Pages currently on disk
+extern list_head free_list;     // Unused tracking nodes
+
+// Page swapping function prototypes
+extern void init_uva_alloc(void);
+extern uintptr_t alloc_limit_page_helper(uintptr_t va, uintptr_t pgdir);
+
 /* Rounding; only works for n = power of two */
 #define ROUND(a, n)     (((((uint64_t)(a))+(n)-1)) & ~((n)-1))
 #define ROUNDDOWN(a, n) (((uint64_t)(a)) & ~((n)-1))
@@ -49,7 +75,7 @@ extern ptr_t allocUserPage(int numPage);
 extern void freeKernelPage(ptr_t baseAddr);
 extern void freeUserPage(ptr_t baseAddr);
 extern ptr_t allocPage(int numPage);
-// TODO [P4-task1] */
+// TODO: [P4-task1] */
 void freePage(ptr_t baseAddr);
 void free_all_pages(pcb_t *pcb);
 
@@ -64,12 +90,16 @@ extern ptr_t allocLargePage(int numPage);
 #define USER_STACK_ADDR 0xf00010000
 #endif
 
-// TODO [P4-task1] */
+// TODO: [P4-task1] */
 extern void* kmalloc(size_t size);
+ptr_t uva_allocPage(int numPage, uintptr_t uva);
 extern void share_pgtable(uintptr_t dest_pgdir, uintptr_t src_pgdir);
 extern uintptr_t alloc_page_helper(uintptr_t va, uintptr_t pgdir);
 
-// TODO [P4-task4]: shm_page_get/dt */
+// TODO: [P4-task3]: swap manager */
+void init_swp_mgr(void);
+
+// TODO: [P4-task4]: shm_page_get/dt */
 uintptr_t shm_page_get(int key);
 void shm_page_dt(uintptr_t addr);
 

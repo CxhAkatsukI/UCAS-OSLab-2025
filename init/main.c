@@ -35,6 +35,9 @@ int g_batch_file_start_sector;
 // Global buffer for passing I/O between batch tasks
 uint64_t batch_io_buffer_val;
 
+// Global variable for the address of swap area
+uint64_t image_end_sec;
+
 static void init_jmptab(void)
 {
     volatile long (*(*jmptab))() = (volatile long (*(*))())KERNEL_JMPTAB_BASE;
@@ -339,6 +342,12 @@ int main(void)
         // Init SMP
         smp_init();
         lock_kernel();
+
+        // [P4-Task3] Initialize swap manager
+        init_swp_mgr();
+
+        // [P4-Task3] Read swap start sector from memory (written by createimage)
+        image_end_sec = *(int *)(pa2kva(SWAP_START_LOC));
 
         // Init task information (〃'▽'〃)
         init_task_info();
