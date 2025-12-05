@@ -312,6 +312,7 @@ static void init_syscall(void)
     syscall[SYSCALL_MBOX_CLOSE] = (long (*)())&do_mbox_close;
     syscall[SYSCALL_MBOX_SEND] = (long (*)())&do_mbox_send;
     syscall[SYSCALL_MBOX_RECV] = (long (*)())&do_mbox_recv;
+    syscall[SYSCALL_FREE_MEM] = (long (*)())&do_get_free_mem;
     syscall[SYSCALL_THREAD_CREATE] = (long (*)())&do_thread_create;
 }
 /************************************************************/

@@ -1,3 +1,4 @@
+#include "screen.h"
 #include <assert.h>
 #include <os/debug.h>
 #include <os/kernel.h>
@@ -109,6 +110,58 @@ void freePage(ptr_t baseAddr)
     page_bitmap[BITMAP_INDEX(baseAddr)] &= ~(1 << BITMAP_OFFSET(baseAddr));
 }
 
+// [P4-Task3] Recycle swap tracking info for a dying process
+void free_page_map_info(int pgdir_id)
+{
+    // 1. Iterate through in_mem_list
+    list_node_t *curr = in_mem_list.next;
+    while (curr != &in_mem_list) {
+        list_node_t *next = curr->next;
+        alloc_info_t *info = list_entry(curr, alloc_info_t, lnode);
+
+        if (info->pgdir_id == pgdir_id) {
+            // Found a page belonging to the dead process
+            // Remove from in_mem_list
+            list_del(curr);
+            // Add back to free_list
+            list_add_tail(curr, &free_list);
+            
+            // Crucial: Decrement the global page count!
+            page_cnt--; 
+            
+            // Reset fields for safety
+            info->uva = 0;
+            info->pa = 0;
+            info->on_disk_sec = 0;
+            info->pgdir_id = 0;
+        }
+        curr = next;
+    }
+
+    // 2. Iterate through swap_out_list (pages on disk)
+    curr = swap_out_list.next;
+    while (curr != &swap_out_list) {
+        list_node_t *next = curr->next;
+        alloc_info_t *info = list_entry(curr, alloc_info_t, lnode);
+
+        if (info->pgdir_id == pgdir_id) {
+            // Remove from swap_out_list
+            list_del(curr);
+            // Add back to free_list
+            list_add_tail(curr, &free_list);
+            
+            // No need to decrement page_cnt here as it's not in RAM
+
+            info->uva = 0;
+            info->pa = 0;
+            info->on_disk_sec = 0;
+            info->pgdir_id = 0;
+        }
+        curr = next;
+    }
+}
+
+// [P4-Task3] Free all pages for a dying process
 void free_all_pages(pcb_t* pcb)
 {
     PTE *pgd = (PTE*)pcb->pgdir;
@@ -385,6 +438,123 @@ uintptr_t alloc_limit_page_helper(uintptr_t va, uintptr_t pgdir) {
     }
 
     return pa2kva(get_pa(pte[vpn0]));
+}
+
+// [P4-Task4] Get free memory size
+size_t do_get_free_mem(void)
+{
+    size_t free_count = 0;
+    size_t total_count = TOTAL_PAGES; // 65536 pages
+
+    // 1. Calculate Free Pages (Scanning the bitmap)
+    for (int i = 0; i < TOTAL_PAGES / 8; i++) {
+        uint8_t byte = page_bitmap[i];
+        if (byte == 0xFF) continue;
+        if (byte == 0x00) { free_count += 8; continue; }
+        for (int j = 0; j < 8; j++) {
+            if (((byte >> j) & 1) == 0) free_count++;
+        }
+    }
+
+    size_t used_count = total_count - free_count;
+    size_t free_bytes = free_count * PAGE_SIZE;
+    size_t used_bytes = used_count * PAGE_SIZE;
+    size_t total_bytes = total_count * PAGE_SIZE;
+
+    // 2. Prepare Data
+    int percent = (used_count * 100) / total_count;
+    int bar_width = 50; 
+    int filled_len = (used_count * bar_width) / total_count;
+
+    int total_mb = total_bytes / (1024 * 1024);
+    int used_mb = used_bytes / (1024 * 1024);
+    int free_mb = free_bytes / (1024 * 1024);
+
+    char num_buf[16]; // Buffer for itoa conversion
+
+    // 3. Render Fancy Output
+    
+    // --- Top Border ---
+    bios_putstr("\n\r");
+    bios_putstr(ANSI_FG_CYAN);
+    bios_putstr("┌──────────────────────────────────────────────────────────────────┐\n\r");
+    bios_putstr("│");
+    bios_putstr(ANSI_FG_WHITE);
+    bios_putstr("  UCAS-OS MEMORY MONITOR                                          ");
+    bios_putstr(ANSI_FG_CYAN);
+    bios_putstr("│\n\r");
+    bios_putstr("├──────────────────────────────────────────────────────────────────┤\n\r");
+
+    // --- Progress Bar Line ---
+    bios_putstr("│");
+    bios_putstr(ANSI_NONE);
+    bios_putstr("  Usage: ");
+    bios_putstr(ANSI_FG_WHITE);
+    bios_putstr("[");
+
+    // Draw the bar with gradient colors
+    for (int i = 0; i < bar_width; i++) {
+        if (i < filled_len) {
+            if (i < bar_width * 0.6)      bios_putstr(ANSI_FG_GREEN);
+            else if (i < bar_width * 0.8) bios_putstr(ANSI_FG_YELLOW);
+            else                          bios_putstr(ANSI_FG_RED);
+            bios_putstr("|");
+        } else {
+            bios_putstr(ANSI_FG_BLACK); // Dark gray for empty slots
+            bios_putstr(".");
+        }
+    }
+
+    bios_putstr(ANSI_FG_WHITE);
+    bios_putstr("] ");
+    
+    // Print Percentage
+    itoa(percent, num_buf, 10);
+    bios_putstr(num_buf);
+    bios_putstr("%  ");
+    
+    bios_putstr(ANSI_FG_CYAN);
+    bios_putstr("│\n\r");
+
+    // --- Stats Line ---
+    bios_putstr("│");
+    bios_putstr(ANSI_NONE);
+    
+    // Used
+    bios_putstr("  Used: ");
+    bios_putstr(ANSI_FG_RED);
+    itoa(used_mb, num_buf, 10);
+    bios_putstr(num_buf);
+    bios_putstr(" MB");
+    bios_putstr(ANSI_NONE);
+
+    // Free
+    bios_putstr("    Free: ");
+    bios_putstr(ANSI_FG_GREEN);
+    itoa(free_mb, num_buf, 10);
+    bios_putstr(num_buf);
+    bios_putstr(" MB");
+    bios_putstr(ANSI_NONE);
+
+    // Total
+    bios_putstr("    Total: ");
+    bios_putstr(ANSI_FG_WHITE);
+    itoa(total_mb, num_buf, 10);
+    bios_putstr(num_buf);
+    bios_putstr(" MB                     ");
+    
+    // Close line
+    bios_putstr(ANSI_FG_CYAN);
+    bios_putstr("│\n\r");
+
+    // --- Bottom Border ---
+    bios_putstr("└──────────────────────────────────────────────────────────────────┘\n\r");
+    bios_putstr(ANSI_NONE);
+
+    pcb_t *current_running = CURRENT_RUNNING;
+    screen_move_cursor(current_running->cursor_x, current_running->cursor_y + 8);
+
+    return free_bytes;
 }
 
 uintptr_t shm_page_get(int key)

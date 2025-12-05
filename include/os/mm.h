@@ -34,7 +34,7 @@
 #define MAP_USER 2
 #define MEM_SIZE 32
 #define PAGE_SIZE 4096 // 4K
-#define INIT_KERNEL_STACK 0xffffffc050500000
+#define INIT_KERNEL_STACK 0xffffffc052000000 // WARNING: Should NOT be less than 0xffffffc051000000, or PGDIR will be overwritten
 #define S_INIT_KERNEL_STACK 0xffffffc050600000
 #define INIT_USER_STACK 0x52500000
 #define FREEMEM_KERNEL (INIT_KERNEL_STACK+PAGE_SIZE)
@@ -44,8 +44,8 @@
 extern uint64_t image_end_sec;
 
 // Limits for the replacement algorithm
-#define USER_PAGE_MAX_NUM 512  // Max pages to track per user
-#define KERN_PAGE_MAX_NUM 4    // Artificial limit: Only 4 physical pages allowed in memory!
+#define USER_PAGE_MAX_NUM 32768  // Max pages to track per user
+#define KERN_PAGE_MAX_NUM 16384  // Artificial limit: Only 64 MB allowed in memory!
 
 // Structure to track page allocation info
 typedef struct {
@@ -98,8 +98,10 @@ extern uintptr_t alloc_page_helper(uintptr_t va, uintptr_t pgdir);
 
 // TODO: [P4-task3]: swap manager */
 void init_swp_mgr(void);
+void free_page_map_info(int pgdir_id);
 
 // TODO: [P4-task4]: shm_page_get/dt */
+size_t do_get_free_mem(void);
 uintptr_t shm_page_get(int key);
 void shm_page_dt(uintptr_t addr);
 

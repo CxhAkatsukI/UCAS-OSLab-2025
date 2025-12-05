@@ -44,6 +44,7 @@ void cmd_clear(char *args);
 void cmd_exec(char *args);
 void cmd_kill(char *args);
 void cmd_taskset(char *args);
+void cmd_free(char *args);
 
 // The command table for our shell
 command_t cmd_table[] = {
@@ -52,7 +53,8 @@ command_t cmd_table[] = {
     {"clear", "Clear the screen.", cmd_clear},
     {"exec", "Execute a task by name. Usage: exec <task_name>", cmd_exec},
     {"kill", "Kill a process by its PID. Usage: kill <pid>", cmd_kill},
-    {"taskset", "Set or retrieve the CPU affinity of a process.", cmd_taskset}
+    {"taskset", "Set or retrieve the CPU affinity of a process.", cmd_taskset},
+    {"free", "Show remaining memory. Usage: free [-h]", cmd_free}
 };
 
 #define NR_CMD (sizeof(cmd_table) / sizeof(command_t))
@@ -339,6 +341,34 @@ void cmd_taskset(char *args) {
     }
 }
 
+// Helper to print memory in human readable format
+void print_mem_human(size_t bytes) {
+    if (bytes < 1024) {
+        printf("%ld B", bytes);
+    } else if (bytes < 1024 * 1024) {
+        printf("%ld KB", bytes / 1024);
+    } else {
+        printf("%ld MB", bytes / (1024 * 1024));
+    }
+}
+
+void cmd_free(char *args) {
+    size_t free_mem = sys_free_mem();
+
+    // Check for -h flag
+    int human_readable = 0;
+    if (args != NULL && strcmp(args, "-h") == 0) {
+        human_readable = 1;
+    }
+
+    printf("Mem:  ");
+    if (human_readable) {
+        print_mem_human(free_mem);
+    } else {
+        printf("%ld", free_mem);
+    }
+    printf("\n");
+}
 
 /**
  * @brief Main entry point for the shell program.

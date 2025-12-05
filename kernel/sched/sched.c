@@ -666,6 +666,10 @@ int do_kill(pid_t pid)
         list_del(&target_pcb->list);
     }
 
+    // [P4-Task3] FIX: Clean up swap tracking info BEFORE freeing pages
+    int pcb_index = target_pcb - pcb;
+    free_page_map_info(pcb_index);
+
     // Free resources
     free_all_pages(target_pcb);
 
