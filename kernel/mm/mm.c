@@ -1,4 +1,6 @@
+#include "os/list.h"
 #include "screen.h"
+#include "type.h"
 #include <assert.h>
 #include <os/debug.h>
 #include <os/kernel.h>
@@ -325,7 +327,7 @@ alloc_info_t* swapPage(void) {
     PTE *pgd = (PTE *)pgdir;
     PTE *pmd = (PTE *)pa2kva(get_pa(pgd[vpn2]));
     PTE *pte = (PTE *)pa2kva(get_pa(pmd[vpn1]));
-    
+
     // Clear the Present bit (make it 0)
     pte[vpn0] = 0; 
 
@@ -356,6 +358,7 @@ ptr_t uva_allocPage(int numPage, uintptr_t uva)
             // Reuse a physical page by swapping someone else out
             alloc_info_t *victim = swapPage(); 
             info->pa = victim->pa; // Steal the physical address
+            victim->pa = 0;
 
             // Move info node back to in_mem_list
             list_del(&info->lnode);
@@ -389,6 +392,7 @@ ptr_t uva_allocPage(int numPage, uintptr_t uva)
         // Memory full: Swap someone out to make room
         alloc_info_t *victim = swapPage();
         new_info->pa = victim->pa; // Reuse physical page
+        victim->pa = 0;
     } else {
         // Memory available: Allocate fresh physical page
         page_cnt++;
@@ -566,4 +570,125 @@ uintptr_t shm_page_get(int key)
 void shm_page_dt(uintptr_t addr)
 {
     // TODO [P4-task4] shm_page_dt:
+}
+
+alloc_info_t *find_alloc_info(uintptr_t uva, uintptr_t pgdir) {
+    list_node_t *curr = in_mem_list.next;
+
+    // Align the input UVA to page boundary for comparison
+    uintptr_t aligned_uva = uva & VA_MASK & ~(NORMAL_PAGE_SIZE - 1);
+
+    // 1. Search in_mem_list (RAM pages)
+    while (curr != &in_mem_list) {
+        alloc_info_t *alloc_info = list_entry(curr, alloc_info_t, lnode);
+
+        if (pcb[alloc_info->pgdir_id].pgdir == pgdir && alloc_info->uva == aligned_uva)
+            return alloc_info;
+
+        curr = curr->next;
+    }
+
+    // 2. Search swap_out_list (Disk pages)
+    curr = swap_out_list.next;
+    while (curr != &swap_out_list) {
+        alloc_info_t *alloc_info = list_entry(curr, alloc_info_t, lnode);
+
+        if (pcb[alloc_info->pgdir_id].pgdir == pgdir && alloc_info->uva == aligned_uva)
+            return alloc_info;
+
+        curr = curr->next;
+    }
+
+    return NULL;
+}
+
+void *user_unmap_page(uintptr_t uva, uintptr_t pgdir)
+{
+    alloc_info_t *info = find_alloc_info(uva, pgdir);
+    if (!info) return NULL;
+
+    // We only need to unmap if it is currently in RAM
+    if (info->pa != 0) {
+        uva &= VA_MASK;
+        uint64_t vpn2 = (uva >> (NORMAL_PAGE_SHIFT + PPN_BITS + PPN_BITS)) & 0x1FF;
+        uint64_t vpn1 = (uva >> (NORMAL_PAGE_SHIFT + PPN_BITS)) & 0x1FF;
+        uint64_t vpn0 = (uva >> NORMAL_PAGE_SHIFT) & 0x1FF;
+
+        PTE *pgd = (PTE *)pgdir;
+
+        // Safety check: PGD entry must exist
+        if ((pgd[vpn2] & _PAGE_PRESENT) == 0) return (void*)info;
+
+        PTE *pmd = (PTE *)pa2kva(get_pa(pgd[vpn2]));
+        // Safety check: PMD entry must exist
+        if ((pmd[vpn1] & _PAGE_PRESENT) == 0) return (void*)info;
+
+        PTE *pte = (PTE *)pa2kva(get_pa(pmd[vpn1]));
+
+        // Clear the leaf PTE.
+        pte[vpn0] = 0;
+
+        // Flush specific page
+        local_flush_tlb_page(uva);
+    }
+
+    return (void *)info;
+}
+
+void user_map_page(uintptr_t uva, uintptr_t pgdir, void *page_info)
+{
+    alloc_info_t *info = (alloc_info_t *)page_info;
+    if (!info) return;
+
+    // 1. Update ownership info
+    // Ensure we store the aligned address
+    info->uva = uva & VA_MASK & ~(NORMAL_PAGE_SIZE - 1);
+    info->pgdir_id = get_pgdir_id(pgdir);
+
+    // 2. If page is in RAM
+    if (info->pa != 0) {
+        uva &= VA_MASK;
+        uint64_t vpn2 = (uva >> (NORMAL_PAGE_SHIFT + PPN_BITS + PPN_BITS)) & 0x1FF;
+        uint64_t vpn1 = (uva >> (NORMAL_PAGE_SHIFT + PPN_BITS)) & 0x1FF;
+        uint64_t vpn0 = (uva >> NORMAL_PAGE_SHIFT) & 0x1FF;
+
+        PTE *pgd = (PTE *)pgdir;
+
+        // Allocate PGD if missing
+        if ((pgd[vpn2] & _PAGE_PRESENT) == 0) {
+            // Allocate a physical page for the next level page table
+            uintptr_t new_page_pa = kva2pa(allocPage(1)); 
+            set_pfn(&pgd[vpn2], new_page_pa >> NORMAL_PAGE_SHIFT);
+            set_attribute(&pgd[vpn2], _PAGE_PRESENT);
+            clear_pgdir(pa2kva(new_page_pa));
+        }
+
+        PTE *pmd = (PTE *)pa2kva(get_pa(pgd[vpn2]));
+
+        // Allocate PMD if missing
+        if ((pmd[vpn1] & _PAGE_PRESENT) == 0) {
+            uintptr_t new_page_pa = kva2pa(allocPage(1));
+            set_pfn(&pmd[vpn1], new_page_pa >> NORMAL_PAGE_SHIFT);
+            set_attribute(&pmd[vpn1], _PAGE_PRESENT);
+            clear_pgdir(pa2kva(new_page_pa));
+        }
+
+        PTE *pte = (PTE *)pa2kva(get_pa(pmd[vpn1]));
+
+        // Check Leaf PTE
+        // Only map if not already present (or overwrite if that's desired behavior)
+        if ((pte[vpn0] & _PAGE_PRESENT) == 0) {
+
+            set_pfn(&pte[vpn0], info->pa >> NORMAL_PAGE_SHIFT);
+
+            // Do NOT use _PAGE_GLOBAL for user pages (security risk)
+            set_attribute(&pte[vpn0], _PAGE_PRESENT | _PAGE_READ | _PAGE_WRITE |
+                                      _PAGE_EXEC | _PAGE_ACCESSED | _PAGE_DIRTY | 
+                                      _PAGE_USER); 
+                                      // Removed _PAGE_GLOBAL
+        }
+
+        // Flush TLB to ensure new mapping is seen immediately if we are running
+        local_flush_tlb_page(uva);
+    }
 }

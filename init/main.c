@@ -201,7 +201,7 @@ void init_pcb_stack(
     pt_regs->regs[11] = (reg_t)argv;
 
     // Initialie `sstatus`, `SPP` field is now 0; `SPIE` field is now 1
-    pt_regs->sstatus = SR_SPIE | SR_SUM; // NOTE: Allow kernel to read syscall arguments
+    pt_regs->sstatus = (SR_SPIE | SR_SUM) & (~SR_SPP); // NOTE: Allow kernel to read syscall arguments
 
     // Initialize `sepc` to the entry point
     pt_regs->sepc = entry_point;
@@ -313,6 +313,9 @@ static void init_syscall(void)
     syscall[SYSCALL_MBOX_SEND] = (long (*)())&do_mbox_send;
     syscall[SYSCALL_MBOX_RECV] = (long (*)())&do_mbox_recv;
     syscall[SYSCALL_FREE_MEM] = (long (*)())&do_get_free_mem;
+    syscall[SYSCALL_PIPE_OPEN] = (long (*)())&do_pipe_open;
+    syscall[SYSCALL_PIPE_GIVE] = (long (*)())&do_pipe_give_pages;
+    syscall[SYSCALL_PIPE_TAKE] = (long (*)())&do_pipe_take_pages;
     syscall[SYSCALL_THREAD_CREATE] = (long (*)())&do_thread_create;
 }
 /************************************************************/
@@ -342,6 +345,11 @@ int main(void)
 
         // Init SMP
         smp_init();
+
+        // Init Process Control Blocks |•'-'•) ✧
+        init_pcb();
+        printk("> [INIT] PCB initialization succeeded.\n");
+
         lock_kernel();
 
         // [P4-Task3] Initialize swap manager
@@ -357,10 +365,6 @@ int main(void)
         bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE));
         bios_putstr("Hello OS!\n\r");
         bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE));
-
-        // Init Process Control Blocks |•'-'•) ✧
-        init_pcb();
-        printk("> [INIT] PCB initialization succeeded.\n");
 
         // Read CPU frequency (｡•ᴗ-)_
         time_base = bios_read_fdt(TIMEBASE);
@@ -402,10 +406,13 @@ int main(void)
         init_conditions();
         printk("> [INIT] CONDITION VARIALES initialization succeeded.\n");
 
-        // Init condition variables
+        // Init mailboxes
         init_mbox();
         printk("> [INIT] MAILBOXES initialization succeeded.\n");
 
+        // Init pipes
+        init_pipes();
+        printk("> [INIT] PIPES initialization succeeded.\n");
 
         // TODO: [p2-task4] Setup timer interrupt and enable all interrupt globally
         // NOTE: The function of sstatus.sie is different from sie's

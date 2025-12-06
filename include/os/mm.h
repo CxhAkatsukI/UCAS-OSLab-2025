@@ -105,6 +105,45 @@ size_t do_get_free_mem(void);
 uintptr_t shm_page_get(int key);
 void shm_page_dt(uintptr_t addr);
 
+// Pipe related data structure
+#define PIPE_NAME_LEN 32
+#define PIPE_SIZE 4096 // Max pages the pipe can hold
+
+typedef struct pipe {
+    char name[PIPE_NAME_LEN];
+    
+    // Circular buffer holding pointers to page tracking structures
+    // alloc_info_t is defined in mm.h, so you might need a void* here 
+    // or include mm.h carefully. void* is safer to avoid circular deps.
+    void *page_buffer[PIPE_SIZE]; 
+    
+    int head;
+    int tail;
+    int used_space; // Count of pages in pipe
+
+    int lock_idx;             // Mutex protection
+    int not_full_cond_idx;    // Wait if full
+    int not_empty_cond_idx;   // Wait if empty
+} pipe_t;
+
+#define PIPE_NUM 10
+extern pipe_t pipes[PIPE_NUM];
+
+void init_pipes(void);
+int do_pipe_open(char *name);
+long do_pipe_give_pages(int pipe_idx, void *src, size_t length);
+long do_pipe_take_pages(int pipe_idx, void *dst, size_t length);
+
+// Helper to check if a virtual address has a valid mapping/tracking info
+void *get_page_info(uintptr_t uva, uintptr_t pgdir);
+
+// Helper for Sender: Unmap page and return its tracking info
+void *user_unmap_page(uintptr_t uva, uintptr_t pgdir);
+
+// Helper for Receiver: Take tracking info and map it to a new address
+void user_map_page(uintptr_t uva, uintptr_t pgdir, void *page_info);
+
+
 
 
 #endif /* MM_H */

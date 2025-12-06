@@ -2,6 +2,7 @@
 #include <type.h>
 #include <os/kernel.h>
 #include <os/lock.h>
+#include <os/mm.h>
 #include <os/sched.h>
 #include <os/smp.h>
 #include <os/string.h>
@@ -82,24 +83,69 @@ void do_mbox_close(int mbox_idx)
     spin_lock_release(&mbox_lock);
 }
 
+// Helper to ensure a range of user memory is physically present in RAM
+// Returns 0 on success, -1 on failure (e.g. invalid address)
+static int make_buffer_resident(void *buffer, int length) {
+    uintptr_t start_va = (uintptr_t)buffer;
+    uintptr_t end_va = start_va + length;
+    
+    // Align start to page boundary
+    uintptr_t cur_va = start_va & ~(PAGE_SIZE - 1);
+
+    while (cur_va < end_va) {
+        // 1. Get the current process's page directory
+        uintptr_t pgdir = CURRENT_RUNNING->pgdir;
+        
+        // 2. Check if the page is valid in the page table
+        // We use your helper 'alloc_limit_page_helper' or 'uva_allocPage'
+        // calling alloc_limit_page_helper ensures:
+        //    a) If page exists in RAM -> returns PA
+        //    b) If page is on Disk -> Swaps it in, returns PA
+        //    c) If page is unmapped -> Allocates new, returns PA
+        
+        // Note: We use the function you wrote earlier that handles swapping
+        // We don't need the physical address here, just the side effect of loading it.
+        uintptr_t pa = alloc_limit_page_helper(cur_va, pgdir);
+        
+        if (pa == 0) {
+            return -1; // Failed to allocate/swap in
+        }
+
+        // Move to next page
+        cur_va += PAGE_SIZE;
+    }
+    return 0;
+}
+
 int do_mbox_send(int mbox_idx, void *msg, int msg_length)
 {
+    if (mbox_idx < 0 || mbox_idx >= MBOX_NUM) return -1;
     mailbox_t *mbox = &mailboxes[mbox_idx];
+    char *data = (char*)msg;
+
     do_mutex_lock_acquire(mbox->lock_idx);
 
-    // Wait while there is not enough space in the buffer
-    while (MAX_MBOX_LENGTH - mbox->used_space < msg_length) {
-        do_condition_wait(mbox->not_full_cond_idx, mbox->lock_idx);
-    }
+    if (make_buffer_resident(msg, msg_length) != 0) return -1;
 
-    // Copy the message into the cicular buffer
     for (int i = 0; i < msg_length; i++) {
-        mbox->buffer[mbox->tail] = ((char *)msg)[i];
-        mbox->tail = (mbox->tail + 1) % MAX_MBOX_LENGTH;
-    }
-    mbox->used_space += msg_length;
+        // If buffer is full, we MUST wait.
+        while (mbox->used_space >= MAX_MBOX_LENGTH) {
+            // CRITICAL: Wake up receiver BEFORE we go to sleep!
+            // Otherwise they might be sleeping too (waiting for data).
+            do_condition_broadcast(mbox->not_empty_cond_idx);
+            
+            // Now we sleep
+            do_condition_wait(mbox->not_full_cond_idx, mbox->lock_idx);
+        }
 
-    // Signal that the mailbox is no longer empty
+        mbox->buffer[mbox->tail] = data[i];
+        mbox->tail = (mbox->tail + 1) % MAX_MBOX_LENGTH;
+        mbox->used_space++;
+        
+        // OPTIMIZATION: Do NOT broadcast here on every byte.
+    }
+
+    // Done sending our batch. Wake up receiver so they can process it.
     do_condition_broadcast(mbox->not_empty_cond_idx);
 
     do_mutex_lock_release(mbox->lock_idx);
@@ -108,22 +154,33 @@ int do_mbox_send(int mbox_idx, void *msg, int msg_length)
 
 int do_mbox_recv(int mbox_idx, void *msg, int msg_length)
 {
+    if (mbox_idx < 0 || mbox_idx >= MBOX_NUM) return -1;
     mailbox_t *mbox = &mailboxes[mbox_idx];
+    char *data = (char*)msg;
+
     do_mutex_lock_acquire(mbox->lock_idx);
 
-    // Wait while there is not enough data to read
-    while (mbox->used_space < msg_length) {
-        do_condition_wait(mbox->not_empty_cond_idx, mbox->lock_idx);
-    }
+    if (make_buffer_resident(msg, msg_length) != 0) return -1;
 
-    // Copy the message from the circular buffer
     for (int i = 0; i < msg_length; i++) {
-        ((char *)msg)[i] = mbox->buffer[mbox->head];
-        mbox->head = (mbox->head + 1) % MAX_MBOX_LENGTH;
-    }
-    mbox->used_space -= msg_length;
+        // If buffer is empty, we MUST wait.
+        while (mbox->used_space <= 0) {
+            // CRITICAL: Wake up sender BEFORE we sleep.
+            // They might be waiting for space.
+            do_condition_broadcast(mbox->not_full_cond_idx);
+            
+            // Now we sleep
+            do_condition_wait(mbox->not_empty_cond_idx, mbox->lock_idx);
+        }
 
-    // Signal that the mailbox is no longer full
+        data[i] = mbox->buffer[mbox->head];
+        mbox->head = (mbox->head + 1) % MAX_MBOX_LENGTH;
+        mbox->used_space--;
+        
+        // OPTIMIZATION: Do NOT broadcast here on every byte.
+    }
+
+    // Done receiving our batch. Wake up sender so they know space is free.
     do_condition_broadcast(mbox->not_full_cond_idx);
 
     do_mutex_lock_release(mbox->lock_idx);

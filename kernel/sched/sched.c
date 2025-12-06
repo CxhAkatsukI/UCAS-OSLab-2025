@@ -80,6 +80,14 @@ void do_scheduler(void)
     // --- Task 5: Priority Scheduling Logic ---
     if (list_is_empty(&ready_queue)) {
         next_running = &pid0_pcb;
+
+        // FIX: Ensure timer is reset even when running IDLE task so we can wake up sleeping tasks!
+        if (CONFIG_TIMESLICE_FINETUNING) {
+            bios_set_timer(get_ticks() + TIMER_INTERVAL);
+        }
+
+        unlock_kernel();
+
     } else {
 
         // Find the first eligible task for current cpu core

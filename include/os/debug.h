@@ -4,7 +4,7 @@
 #include <os/smp.h>
 #include <printk.h>
 
-#define KERNEL_LOG
+// #define KERNEL_LOG
 
 // A simple logging function that includes the core ID
 

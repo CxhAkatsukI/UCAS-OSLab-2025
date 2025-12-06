@@ -21,9 +21,10 @@ void interrupt_helper(regs_context_t *regs, uint64_t stval, uint64_t scause)
 {
     // TODO: [p2-task3] & [p2-task4] interrupt handler.
     // call corresponding handler by the value of `scause`
+    disable_preempt();
     uint64_t exc_code = scause & (~SCAUSE_IRQ_FLAG);
     if ((scause & SCAUSE_IRQ_FLAG) > 0) {
-        int disable_print = (exc_code == IRQC_S_TIMER);
+        int disable_print = 0; // (exc_code == IRQC_S_TIMER);
         if (!disable_print)
             klog("IRQ received, code: %d\n", exc_code); // Log the IRQ code
         ((handler_t)irq_table[exc_code])(regs, stval, scause);
@@ -34,6 +35,7 @@ void interrupt_helper(regs_context_t *regs, uint64_t stval, uint64_t scause)
             klog("Exception received, code: %d\n", exc_code); // Log the Exception code
         ((handler_t)exc_table[exc_code])(regs, stval, scause);
     }
+    enable_preempt();
 }
 
 void handle_irq_timer(regs_context_t *regs, uint64_t stval, uint64_t scause)
@@ -43,7 +45,18 @@ void handle_irq_timer(regs_context_t *regs, uint64_t stval, uint64_t scause)
     if (!CONFIG_TIMESLICE_FINETUNING) {
         bios_set_timer(get_ticks() + TIMER_INTERVAL);
     }
-    do_scheduler();
+
+    // FIX: Did we come from Kernel Mode?
+    // We check the saved 'sstatus' register in the context.
+    if ((regs->sstatus & (1L << 8)) != 0) {
+        // CASE A: Interrupt happened inside Kernel (while holding BKL).
+        // We MUST NOT try to schedule, or we will deadlock on the BKL.
+        // We simply return. The interrupted kernel code (syscall) will continue,
+        // finish its work, and release the BKL.
+        ;
+    } else {
+        do_scheduler();
+    }
 }
 
 void handle_page_fault(regs_context_t *regs, uint64_t stval, uint64_t scause)
