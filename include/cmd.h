@@ -28,7 +28,6 @@ void run_command_loop();
 // external variables
 extern int tasknum;
 extern ptr_t next_task_addr;
-uint64_t user_input_and_launch_task_handler(int tasknum);
 
 // helper function, for kernel batch processing
 int parse_batch_file(char *buffer, char tasks_array[][MAX_NAME_LEN], int max_tasks);

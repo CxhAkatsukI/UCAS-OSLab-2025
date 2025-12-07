@@ -1,39 +1,42 @@
-#include "os/task.h"
+#include <type.h>
+#include <assert.h>
+#include <cmd.h>
+#include <screen.h>
+#include <printk.h>
+
+#include <os/task.h>
 #include <os/kernel.h>
 #include <os/smp.h>
 #include <os/string.h>
-#include <type.h>
 #include <os/debug.h>
 #include <os/list.h>
 #include <os/loader.h>
 #include <os/lock.h>
 #include <os/sched.h>
-#include <os/smp.h>
 #include <os/time.h>
 #include <os/mm.h>
-#include <cmd.h>
-#include <screen.h>
-#include <printk.h>
-#include <assert.h>
 
+/* Global Process Control Block Array */
 pcb_t pcb[NUM_MAX_TASK];
 
-// Default PCB stacks
+/* Default PCB stack locations */
 const ptr_t pid0_stack = INIT_KERNEL_STACK + PAGE_SIZE;
 const ptr_t s_pid0_stack = S_INIT_KERNEL_STACK + PAGE_SIZE;
 
-// Default PCB, primary core
+/* 
+ * Default PCB, primary core 
+ * Note: cpu_mask 0x3 ensures default programs can run on both cores.
+ */
 pcb_t pid0_pcb = {
     .pid = 0,
     .kernel_sp = (ptr_t)pid0_stack,
     .user_sp = (ptr_t)pid0_stack,
-    .cpu_mask = 0x3, // NOTE: We must ensure default programs can run on both cores
+    .cpu_mask = 0x3,
     .task_name = "Windows",
     .status = TASK_BLOCKED,
-    .pgdir = 0xffffffc051000000 // pa2kva(PGDIR_PA)
 };
 
-// Default PCB, secondary core
+/* Default PCB, secondary core */
 pcb_t s_pid0_pcb = {
     .pid = 0,
     .kernel_sp = (ptr_t)s_pid0_stack,
@@ -41,271 +44,210 @@ pcb_t s_pid0_pcb = {
     .cpu_mask = 0x3,
     .task_name = "MS-DOS",
     .status = TASK_BLOCKED,
-    .pgdir = 0xffffffc051000000 // pa2kva(PGDIR_PA)
 };
 
 LIST_HEAD(ready_queue);
 LIST_HEAD(sleep_queue);
 
-/* global process id */
+/* Global process ID counter */
 pid_t process_id = 1;
 
-void do_scheduler(void)
+/* -------------------------------------------------------------------------- */
+/*                            SCHEDULER LOGIC                                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * get_idle_task - Retrieve the Idle Task PCB for the specific core.
+ * @core_id: The ID of the current CPU core.
+ */
+static inline pcb_t *get_idle_task(uint64_t core_id)
 {
-    // Get the current core's ID and its mask
-    uint64_t core_id = get_current_cpu_id();
-    uint64_t core_mask = 1 << core_id;
-
-    // lock_kernel();
-    // Use macro to set current_running pointer
-    pcb_t *current_running = CURRENT_RUNNING;
-
-    // TODO: [p2-task3] Check sleep queue to wake up PCBs
-    check_sleeping();
-
-    /************************************************************/
-    /* Do not touch this comment. Reserved for future projects. */
-    /************************************************************/
-
-    // [p2-task1] Modify the current_running pointer.
-    pcb_t *prev_running = current_running;
-    pcb_t *next_running;
-
-    if (prev_running->status == TASK_RUNNING) {
-        prev_running->status = TASK_READY;
-        list_add_tail(&prev_running->list, &ready_queue);
-    }
-
-#if PRIORITY_SCHEDULING == 1
-    // --- Task 5: Priority Scheduling Logic ---
-    if (list_is_empty(&ready_queue)) {
-        next_running = &pid0_pcb;
-
-        // FIX: Ensure timer is reset even when running IDLE task so we can wake up sleeping tasks!
-        if (CONFIG_TIMESLICE_FINETUNING) {
-            bios_set_timer(get_ticks() + TIMER_INTERVAL);
-        }
-
-        unlock_kernel();
-
-    } else {
-
-        // Find the first eligible task for current cpu core
-        pcb_t *first_eligible_task = NULL;
-
-        // Find the task with the highest workload
-        list_node_t *current_node;
-        pcb_t *highest_priority_task = NULL;
-
-        // Dynamic prioritizing logic
-        int max_dynamic_priority = -1;
-        int task_dynamic_priority;
-
-        //Static remaining_workload logic
-        int max_remaining_workload = -1;
-        int min_remaining_workload = 100;
-        pcb_t *highest_workload_task = NULL;
-        pcb_t *lowest_workload_task = NULL;
-
-        // Lapcount awareness
-        int min_lap_count = 100000;
-        pcb_t *lowest_lapcount_task = NULL;
-
-
-        for (current_node = ready_queue.next; current_node != &ready_queue;
-             current_node = current_node->next) {
-            pcb_t *task = list_entry(current_node, pcb_t, list);
-
-            // Skip when core mask doesn't meet our requirement
-            if ((task->cpu_mask & core_mask) == 0)
-                continue;
-
-            // Set first_eligible_task
-            if (first_eligible_task == NULL)
-                first_eligible_task = task;
-
-            // Calculate task_dynamic_priority
-            task_dynamic_priority = task->remaining_workload + (get_ticks() - task->last_run_time) * AGING_FACTOR;
-
-            // Identify the task with the highest priority
-            if (task_dynamic_priority > max_dynamic_priority) {
-                max_dynamic_priority = task_dynamic_priority;
-                highest_priority_task = task;
-            }
-
-            // Identify the task with the highest workload
-            if (task->remaining_workload > max_remaining_workload) {
-                max_remaining_workload = task->remaining_workload;
-                highest_workload_task = task;
-            }
-
-            // Identify the task with the lowest workload
-            if (task->remaining_workload < min_remaining_workload) {
-                min_remaining_workload = task->remaining_workload;
-                lowest_workload_task = task;
-            }
-
-            // Identify the task with the min lap_count
-            if (task->lap_count < min_lap_count) {
-                min_lap_count = task->lap_count;
-                lowest_lapcount_task = task;
-            }
-
-        }
-
-        // Next running selection logic
-        if (CONFIG_DYNAMIC_PRIORITIZING) {
-            // Select highest_priority_task
-            next_running = highest_priority_task;
-        } else if (CONFIG_WORKLOAD_PRIORITIZING) {
-            // Select next_running based on remianing workload
-            if (max_remaining_workload - min_remaining_workload > 30) {
-                // Let the lowest_workload_task finish its run
-                next_running = lowest_workload_task;
-            } else {
-                // Select the highest_workload_task
-                next_running = highest_workload_task;
-            }
-        } else if (CONFIG_TIMESLICE_FINETUNING) {
-            // Remain Round-Robin logic in this case
-            next_running = first_eligible_task;
-            // Ensure next_running is in current lap
-            if (next_running->lap_count > min_lap_count) {
-                next_running = lowest_lapcount_task;
-            }
-            uint64_t timeslice = calculate_timeslice(next_running, min_lap_count);
-            // Find terminating tasks
-            pcb_t *terminating_task = find_terminating_tasks(min_lap_count);
-            if (terminating_task) {
-                next_running = terminating_task;
-                timeslice = TIMER_INTERVAL;
-            }
-            bios_set_timer(get_ticks() + timeslice);
-        }
-
-        // 2. Remove it from the ready queue
-        if (next_running != NULL) {
-            list_del(&next_running->list);
-        } else {
-            if (core_id == 0) {
-                next_running = &pid0_pcb;
-            } else {
-                next_running = &s_pid0_pcb;
-            }
-        }
-    }
-#else
-    // --- Original Round-Robin Logic (deprecated for multi-core) ---
-    if (!list_is_empty(&ready_queue)) {
-        next_running = list_entry(ready_queue.next, pcb_t, list);
-        list_del(ready_queue.next);
-    } else {
-        next_running = &pid0_pcb;
-    }
-#endif
-
-    // current_running = next_running;
-    // current_running->status = TASK_RUNNING;
-    // NOTE: per-core pointer shall be updated properly
-    SET_CURRENT_RUNNING(next_running);
-    CURRENT_RUNNING->status = TASK_RUNNING;
-
-    // Update prev_running's last run time
-    prev_running->last_run_time = get_ticks();
-
-    // Set the task's on_cpu field for `ps` command
-    if (prev_running->pid > 0) prev_running->on_cpu = 0xF;
-    if (next_running->pid > 0) next_running->on_cpu = core_id;
-
-    // Log the decision made by the scheduler
-    // klog("Scheduler on core %d picked task '%s' (PID %d) with mask 0x%x\n",
-    //      core_id, next_running->task_name, next_running->pid, next_running->cpu_mask);
-
-    // Switch Page Table!
-    // We need to convert the KVA of pgdir to PFN for satp.
-    // kva2pa(next_running->pgdir) >> 12
-    set_satp(SATP_MODE_SV39, next_running->pid, kva2pa(next_running->pgdir) >> NORMAL_PAGE_SHIFT);
-    local_flush_tlb_all();
-
-    // [p2-task1] switch_to current_running
-    switch_to(prev_running, CURRENT_RUNNING);
-    // unlock_kernel();
-}
-
-void do_sleep(uint32_t sleep_time)
-{
-    // TODO: [p2-task3] sleep(seconds)
-    // NOTE: you can assume: 1 second = 1 `timebase` ticks
-
-    // Get current_running from macro
-    pcb_t *current_running = CURRENT_RUNNING;
-
-    // 1. block the current_running
-    current_running->status = TASK_BLOCKED;
-    // 2. set the wake up time for the blocked task
-    current_running->wakeup_time = get_timer() + sleep_time;
-    // 3. reschedule because the current_running is blocked.
-    list_add_tail(&current_running->list, &sleep_queue);
-    do_scheduler();
-}
-
-void do_block(list_node_t *pcb_node, list_head *queue)
-{
-    // TODO: [p2-task2] block the pcb task into the block queue
-
-    // queue shall be the blocked queue
-    pcb_t *pcb = list_entry(pcb_node, pcb_t, list);
-    pcb->status = TASK_BLOCKED;
-    list_add_tail(pcb_node, queue);
-
-    // call the scheduler to run a different task
-    do_scheduler();
-}
-
-void do_unblock(list_node_t *pcb_node)
-{
-    // TODO: [p2-task2] unblock the `pcb` from the block queue
-
-    // set the pcb's status to TASK_READY
-    pcb_t *pcb = list_entry(pcb_node, pcb_t, list);
-    pcb->status = TASK_READY;
- 
-    // delete the `pcb` from the block queue
-    list_del(pcb_node);
-
-    // Append the pcb node to the ready_queue
-    list_add_tail(pcb_node, &ready_queue);
-}
-
-void do_set_sche_workload(int workload)
-{
-    // Get current_running from macro
-    pcb_t *current_running = CURRENT_RUNNING;
-
-    // New lap detection
-    if (workload > current_running->remaining_workload + 60) {
-        current_running->lap_count++;
-    }
-    // Set remaining workload
-    current_running->remaining_workload = workload;
+    return (core_id == 0) ? &pid0_pcb : &s_pid0_pcb;
 }
 
 /**
- * @brief Calculates a dynamic timeslice for a task based on its workload
- *        relative to other tasks in the ready queue.
- *
- * @param task_to_run A pointer to the PCB of the task that is about to be scheduled.
- * @return The calculated timeslice duration in timer ticks.
+ * sched_enqueue_prev - Handle the task that was just switched out.
+ * @prev: Pointer to the PCB of the previous task.
+ * 
+ * If the task was in RUNNING state, downgrade it to READY and re-add 
+ * it to the ready queue.
+ */
+static void sched_enqueue_prev(pcb_t *prev)
+{
+    if (prev->status == TASK_RUNNING) {
+        prev->status = TASK_READY;
+        list_add_tail(&prev->list, &ready_queue);
+    }
+}
+
+/**
+ * pick_next_task - Select the next task to run based on scheduling policy.
+ * @core_mask: Bitmask representing the current core.
+ * @core_id: ID of the current core.
+ * 
+ * Iterates through the ready queue and selects a task based on:
+ * 1. CPU Affinity
+ * 2. Dynamic Priority / Workload / Timeslice (depending on macros)
+ */
+static pcb_t *pick_next_task(uint64_t core_mask, uint64_t core_id)
+{
+    /* If queue is empty, return Idle Task immediately */
+    if (list_is_empty(&ready_queue)) {
+        /* [Task 5] Keep timer alive for finetuning even when idle */
+        if (CONFIG_TIMESLICE_FINETUNING) {
+            bios_set_timer(get_ticks() + TIMER_INTERVAL);
+        }
+        return get_idle_task(core_id);
+    }
+
+#if PRIORITY_SCHEDULING == 1
+    pcb_t *best_task = NULL;
+
+    /* Temporary variables for metric tracking (initialized to worst-case) */
+    int max_prio = -1;          /* For Dynamic Prio */
+    int max_workload = -1;      /* For Workload Prio (High) */
+    int min_workload = 100000;  /* For Workload Prio (Low) */
+    int min_lap = 100000;       /* For Timeslice Tuning */
+
+    pcb_t *first_eligible = NULL;
+    pcb_t *candidate_dynamic = NULL;
+    pcb_t *candidate_high_work = NULL;
+    pcb_t *candidate_low_work = NULL;
+    pcb_t *candidate_low_lap = NULL;
+
+    list_node_t *curr;
+    
+    /* Iterate through the ready queue */
+    for (curr = ready_queue.next; curr != &ready_queue; curr = curr->next) {
+        pcb_t *task = list_entry(curr, pcb_t, list);
+
+        /* 1. Affinity Check */
+        if ((task->cpu_mask & core_mask) == 0)
+            continue;
+
+        /* Record first match as Round-Robin fallback */
+        if (!first_eligible) 
+            first_eligible = task;
+
+        /* 2. Collect metrics based on active policy */
+        if (CONFIG_DYNAMIC_PRIORITIZING) {
+            int prio = task->remaining_workload + 
+                       (get_ticks() - task->last_run_time) * AGING_FACTOR;
+            if (prio > max_prio) {
+                max_prio = prio;
+                candidate_dynamic = task;
+            }
+        } else if (CONFIG_WORKLOAD_PRIORITIZING) {
+            if (task->remaining_workload > max_workload) {
+                max_workload = task->remaining_workload;
+                candidate_high_work = task;
+            }
+            if (task->remaining_workload < min_workload) {
+                min_workload = task->remaining_workload;
+                candidate_low_work = task;
+            }
+        } else if (CONFIG_TIMESLICE_FINETUNING) {
+            if (task->lap_count < min_lap) {
+                min_lap = task->lap_count;
+                candidate_low_lap = task;
+            }
+        }
+    }
+
+    /* 3. Final Decision */
+    if (CONFIG_DYNAMIC_PRIORITIZING) {
+        best_task = candidate_dynamic;
+    } else if (CONFIG_WORKLOAD_PRIORITIZING) {
+        /* Anti-starvation: prioritize small tasks if gap is too large */
+        if (max_workload - min_workload > 30)
+            best_task = candidate_low_work;
+        else
+            best_task = candidate_high_work;
+    } else if (CONFIG_TIMESLICE_FINETUNING) {
+        /* Default to Round-Robin */
+        best_task = first_eligible;
+        
+        /* If RR candidate runs too fast, switch to slower one */
+        if (best_task && best_task->lap_count > min_lap) {
+            best_task = candidate_low_lap;
+        }
+
+        /* Timeslice calculation and termination check */
+        if (best_task) {
+            uint64_t slice = calculate_timeslice(best_task, min_lap);
+            pcb_t *term_task = find_terminating_tasks(min_lap);
+            if (term_task) {
+                best_task = term_task;
+                slice = TIMER_INTERVAL;
+            }
+            bios_set_timer(get_ticks() + slice);
+        }
+    }
+
+    /* Fallback: If advanced policies fail, use first eligible (RR) */
+    if (!best_task) 
+        best_task = first_eligible;
+    
+    /* Final Fallback: Run Idle task */
+    if (!best_task) 
+        best_task = get_idle_task(core_id);
+
+    return best_task;
+
+#else
+    /* --- Simple Round-Robin --- */
+    if (!list_is_empty(&ready_queue)) {
+        return list_entry(ready_queue.next, pcb_t, list);
+    }
+    return get_idle_task(core_id);
+#endif
+}
+
+/**
+ * perform_switch_hooks - Pre-context-switch updates.
+ * @prev: The task being swapped out.
+ * @next: The task being swapped in.
+ * @core_id: The current CPU core ID.
+ */
+static void perform_switch_hooks(pcb_t *prev, pcb_t *next, uint64_t core_id)
+{
+    /* 1. Remove 'next' from the ready queue (Idle task is never in queue) */
+    if (next->pid != 0) {
+        list_del(&next->list);
+    }
+
+    /* 2. Update metadata (Per-CPU variable) */
+    SET_CURRENT_RUNNING(next);
+    next->status = TASK_RUNNING;
+    prev->last_run_time = get_ticks();
+
+    /* 3. Update 'on_cpu' flag for `ps` command (0xF indicates not running) */
+    if (prev->pid > 0) prev->on_cpu = 0xF;
+    if (next->pid > 0) next->on_cpu = core_id;
+
+    /* 
+     * 4. Switch Page Table (Virtual Memory)
+     * PFN = KVA >> 12. Flush TLB strictly as required.
+     */
+    set_satp(SATP_MODE_SV39, next->pid, kva2pa(next->pgdir) >> NORMAL_PAGE_SHIFT);
+    local_flush_tlb_all();
+}
+
+/**
+ * calculate_timeslice - Calculate dynamic timeslice based on workload.
+ * @task_to_run: The task selected to run next.
+ * @min_lap_count: The minimum lap count in the current queue.
+ * 
+ * Tasks with higher relative workload receive a proportionally longer 
+ * timeslice, clamped between MIN/MAX bounds.
  */
 uint64_t calculate_timeslice(pcb_t *task_to_run, int min_lap_count)
 {
-    // If only one task is ready, or it's the idle task, use the default interval.
     if (list_is_empty(&ready_queue) || task_to_run->pid == 0) {
         return TIMER_INTERVAL;
     }
 
-    // 1. Find the maximum workload among all tasks in the ready queue.
-    //    We also consider the task that is about to run.
+    /* Find max workload in queue (including current task) */
     int max_workload = task_to_run->remaining_workload;
     list_node_t *node;
     for (node = ready_queue.next; node != &ready_queue; node = node->next) {
@@ -316,31 +258,28 @@ uint64_t calculate_timeslice(pcb_t *task_to_run, int min_lap_count)
     }
 
     if (max_workload == 0) {
-        return TIMER_INTERVAL; // Avoid division by zero.
+        return TIMER_INTERVAL;
     }
 
-    // 2. Define the bounds for our dynamic timeslice.
-    const uint64_t MIN_INTERVAL = TIMER_INTERVAL / 5; // e.g., 3000
-    const uint64_t MAX_INTERVAL = TIMER_INTERVAL * 5; // e.g., 75000
+    /* Define bounds */
+    const uint64_t MIN_INTERVAL = TIMER_INTERVAL / 5;
+    const uint64_t MAX_INTERVAL = TIMER_INTERVAL * 5;
 
-    // 3. Calculate the proportional timeslice using integer arithmetic.
-    // A task with a higher workload gets a proportionally longer timeslice.
-    uint64_t new_interval = ((uint64_t)task_to_run->remaining_workload *
-        MAX_INTERVAL) / max_workload;
+    /* Calculate proportional timeslice */
+    uint64_t new_interval = ((uint64_t)task_to_run->remaining_workload * MAX_INTERVAL) / max_workload;
 
-    // 4. Clamp the value to our defined min/max bounds.
-    // This ensures that tasks far ahead still get a small amount of time to run,
-    // preventing them from stopping completely.
+    /* Clamp value */
     if (new_interval < MIN_INTERVAL) {
         return MIN_INTERVAL;
     }
 
-    // The upper bound is naturally handled by the formula, since
-    // task_to_run->remaining_workload cannot be greater than max_workload.
     return new_interval;
 }
 
-// Helping strategy: prioritizing the tasks that are about to terminate
+/**
+ * find_terminating_tasks - Strategy to prioritize terminating tasks.
+ * @min_lap_count: Current minimum lap count context.
+ */
 pcb_t *find_terminating_tasks(int min_lap_count)
 {
     uint64_t core_id = get_current_cpu_id();
@@ -362,270 +301,237 @@ pcb_t *find_terminating_tasks(int min_lap_count)
     return NULL;
 }
 
-static const char *get_status_string(task_status_t status)
+/**
+ * do_scheduler - Main scheduler entry point.
+ */
+void do_scheduler(void)
 {
-    switch (status) {
-        case TASK_BLOCKED: return "BLOCKED";
-        case TASK_RUNNING: return "RUNNING";
-        case TASK_READY: return "READY  ";
-        case TASK_EXITED: return "EXITED ";
-        case TASK_UNUSED: return "UNUSED ";
-        default: return "UNKNOWN";
-    }
+    uint64_t core_id = get_current_cpu_id();
+    uint64_t core_mask = 1 << core_id;
+    pcb_t *prev = CURRENT_RUNNING;
+    pcb_t *next;
+
+    /* 1. Wake up expired tasks from sleep queue */
+    check_sleeping();
+
+    /* 2. Re-enqueue current task if it was preempted (not blocked/exited) */
+    sched_enqueue_prev(prev);
+
+    /* 3. Pick next task (Policy) */
+    next = pick_next_task(core_mask, core_id);
+
+    /* 4. Prepare hardware/metadata for switch */
+    perform_switch_hooks(prev, next, core_id);
+
+    /* 5. Perform Context Switch (Assembly) */
+    switch_to(prev, next);
 }
 
-void do_process_show()
+/* -------------------------------------------------------------------------- */
+/*                          EXECUTION / CREATION                              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * sched_alloc_pcb - Allocate a free PCB slot.
+ * Returns NULL if table is full.
+ */
+static pcb_t *sched_alloc_pcb(void)
 {
-    bios_putstr(ANSI_FMT("[PROCESS TABLE]\n\r", ANSI_FG_GREEN));
-    bios_putstr(ANSI_FMT("PID   STATUS    KERNEL_SP             USER_SP        CPU    MASK    NAME\n\r", ANSI_FG_YELLOW));
-    bios_putstr(ANSI_FG_CYAN);
+    /* 1. Try new slot */
+    if (process_id < NUM_MAX_TASK) {
+        return &pcb[process_id];
+    }
 
-    // Get current_running from macro
-    pcb_t *current_running = CURRENT_RUNNING;
-
-    // move cursor downwards
-    screen_move_cursor(current_running->cursor_x, current_running->cursor_y + 2);
-
-    // Loop through all PCBs that have been created
-    for (int i = 0; i < process_id; i++) {
-        // Only print tasks that haven't exited
-        if (pcb[i].status != TASK_EXITED && pcb[i].status != TASK_UNUSED) {
-            printk("%d     %s   0x%lx    0x%lx    0x%x    0x%x     %s\n",
-                   pcb[i].pid,
-                   get_status_string(pcb[i].status),
-                   pcb[i].kernel_sp,
-                   pcb[i].user_sp,
-                   pcb[i].on_cpu,
-                   pcb[i].cpu_mask,
-                   pcb[i].task_name);
+    /* 2. Try recycling exited slots */
+    for (int i = 0; i < NUM_MAX_TASK; i++) {
+        if (pcb[i].status == TASK_UNUSED || pcb[i].status == TASK_EXITED) {
+            return &pcb[i];
         }
     }
-    printk("\n");
-    bios_putstr(ANSI_NONE);
+    
+    /* 3. Fallback (unsafe, preserved behavior) */
+    return &pcb[NUM_MAX_TASK - 1];
 }
 
+/**
+ * mm_init_pcb_vm - Initialize Virtual Memory for new process.
+ * Allocates page directory and shares kernel mappings.
+ */
+static int mm_init_pcb_vm(pcb_t *pcb)
+{
+    uintptr_t pgdir = allocPage(1);
+    if (!pgdir) return -1;
+
+    clear_pgdir(pgdir);
+    /* Copy kernel PGD entries to user PGD */
+    share_pgtable(pgdir, pa2kva(PGDIR_PA));
+    
+    pcb->pgdir = pgdir;
+    return 0;
+}
+
+/**
+ * mm_setup_user_stack - Setup User Stack with argc/argv.
+ * @pcb: Target PCB.
+ * @argc: Argument count.
+ * @argv: Argument strings.
+ * 
+ * Layout at USER_STACK_ADDR (High Address):
+ *   | "arg2"       |
+ *   | "arg1"       |
+ *   | "prog_name"  | <- Strings
+ *   | NULL         |
+ *   | ptr to arg2  |
+ *   | ptr to arg1  |
+ *   | ptr to name  | <- argv array
+ *   [ User SP      ]
+ * 
+ * Returns: Initial User Stack Pointer (Virtual Address).
+ */
+static uintptr_t mm_setup_user_stack(pcb_t *pcb, int argc, char *argv[])
+{
+    /* 1. Allocate physical page for User Stack top */
+    uintptr_t user_stack_base_va = USER_STACK_ADDR - PAGE_SIZE;
+    uintptr_t user_stack_page_kva = alloc_page_helper(user_stack_base_va, pcb->pgdir);
+    
+    /* 2. Calculate size for strings */
+    int total_str_len = 0;
+    for (int i = 0; i < argc; ++i) {
+        total_str_len += strlen(argv[i]) + 1; /* +1 for \0 */
+    }
+
+    /* 3. Calculate pointers in Kernel Virtual Address (KVA) */
+    char *page_top = (char *)(user_stack_page_kva + PAGE_SIZE);
+    char *str_area_base = page_top - total_str_len;
+    
+    /* argv array starts below strings. +1 for NULL terminator */
+    char **argv_array_base = (char **)(str_area_base - (argc + 1) * sizeof(char *));
+
+    /* 4. Align stack pointer to 16 bytes (RISC-V requirement) */
+    argv_array_base = (char **)((uintptr_t)argv_array_base & ~0xF);
+
+    /* 5. Copy Data */
+    char *curr_str_dest = str_area_base;
+    uintptr_t kva_to_uva_offset = USER_STACK_ADDR - (uintptr_t)(user_stack_page_kva + PAGE_SIZE);
+
+    for (int i = 0; i < argc; ++i) {
+        strcpy(curr_str_dest, argv[i]);
+        
+        /* Store pointer as User Virtual Address, not KVA */
+        argv_array_base[i] = (char *)((uintptr_t)curr_str_dest + kva_to_uva_offset);
+
+        curr_str_dest += strlen(argv[i]) + 1;
+    }
+    argv_array_base[argc] = NULL;
+
+    /* 6. Return final User SP */
+    return (uintptr_t)argv_array_base + kva_to_uva_offset;
+}
+
+/**
+ * do_exec - Execute a new program.
+ */
 pid_t do_exec(char *name, int argc, char *argv[], uint64_t mask)
 {
-
-    // Get current_running from macro
     pcb_t *current_running = CURRENT_RUNNING;
 
+    /* 1. Validation */
     int task_idx = search_task_name(tasknum, name);
     if (task_idx == -1) {
         bios_putstr(ANSI_FMT("ERROR: Invalid task name in arguments: ", ANSI_BG_RED));
         bios_putstr(ANSI_BG_RED);
         bios_putstr(name);
         bios_putstr(ANSI_FMT("\n\r", ANSI_NONE));
-        // move cursor downwards
+        
         screen_move_cursor(current_running->cursor_x, current_running->cursor_y + 1);
-        return 0; // Abort
+        return 0;
     }
 
-    // Get a free PCB
-    pcb_t *new_pcb = NULL;
-    if (process_id < NUM_MAX_TASK) {
-        new_pcb = &pcb[process_id];
-    } else {
-        int i;
-        for (i = 0; i < NUM_MAX_TASK; i++) {
-            if (pcb[i].status == TASK_UNUSED || pcb[i].status == TASK_EXITED) {
-                new_pcb = &pcb[i];
-                break;
-            }
-        }
-        if (i >= NUM_MAX_TASK)
-            new_pcb = &pcb[NUM_MAX_TASK - 1];
+    /* 2. Allocation */
+    pcb_t *new_pcb = sched_alloc_pcb();
+    if (!new_pcb) {
+        bios_putstr(ANSI_FMT("ERROR: PCB table full.\n\r", ANSI_BG_RED));
+        return 0;
     }
 
-    // Set up Page Directory (VM)
-    // Alloc physical page for pgdir, get its KVA
-    uintptr_t pgdir = allocPage(1);
-    clear_pgdir(pgdir);
-    // Share Kernel Mapping (Copy kernel PGD to user PGD)
-    share_pgtable(pgdir, pa2kva(PGDIR_PA));
-    new_pcb->pgdir = pgdir;
-
-    // Map Task Code/Data
-    // This copies code from SD to the new physical pages mapped in pgdir
-    uint64_t entry_point = map_task(name, pgdir);
-    if (entry_point == 0) return 0; // Failed
-
-    // Variable for the entry point of a program
-    // ptr_t entry_point;
-
-    // NOTE: This makes the following content is obsolete in virtual memory scenario
-    if (!CONFIG_VMEM_LOADING) {
-
-        // If static loading is enabled, modify next_task_addr
-        if (CONFIG_STATIC_LOADING) {
-            next_task_addr = TASK_MEM_BASE + TASK_SIZE * task_idx;
-        }
-
-        // Check if the task has been loaded before
-        if (tasks[task_idx].load_address == 0) {
-            entry_point = load_task_img(tasks[task_idx].name, tasknum, next_task_addr);
-
-            // Save the load address for future executions
-            tasks[task_idx].load_address = entry_point;
-
-            // Update the next available task address, page-aligned
-            next_task_addr += tasks[task_idx].byte_size;
-            next_task_addr = (next_task_addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-
-            // Log the operation
-            klog("First load of '%s' at address 0x%lx\n", tasks[task_idx].name, entry_point);
-        } else {
-            // Get the entry point from the saved load address
-            entry_point = tasks[task_idx].load_address;
-
-            // Log the operation
-            klog("Re-executing '%s' from address 0x%lx\n", tasks[task_idx].name, entry_point);
-        }
-    } else {
-        // The following logic will be adopted when virtual memory is implemented
-
-        // Kernel Stack
-        new_pcb->kernel_stack_base = allocPage(KERNEL_STACK_PAGES);
-        new_pcb->kernel_sp = new_pcb->kernel_stack_base + PAGE_SIZE * KERNEL_STACK_PAGES;
-
-        // User Stack
-        // Allocate user stack page at USER_STACK_ADDR - PAGE_SIZE
-        uintptr_t user_stack_kva = alloc_page_helper(USER_STACK_ADDR - PAGE_SIZE, pgdir);
-
-        // Copy argv to the top of user stack
-        // Calculate total size needed
-        int total_len = 0;
-        for (int i = 0; i < argc; ++i) {
-            total_len += strlen(argv[i]) + 1;
-        }
-
-
-        // Pointers in KVA (to write data)
-        char *kva_top = (char*)(user_stack_kva + PAGE_SIZE);
-        char *kva_str_base = kva_top - total_len;
-        char **kva_argv_base = (char**)((kva_str_base) - (argc + 1) * sizeof(char *));
-
-        kva_argv_base = (char **)((unsigned long long)kva_argv_base & ~0xF);
-
-        uintptr_t offset_str = (uintptr_t)kva_str_base - user_stack_kva;
-        uintptr_t offset_argv = (uintptr_t)kva_argv_base - user_stack_kva;
-
-        // Pointers in User VA (to store in argv array)
-        uintptr_t uva_top = USER_STACK_ADDR;
-        uintptr_t uva_str_base = (uva_top - PAGE_SIZE) + offset_str;
-        uintptr_t uva_argv_base = (uva_top - PAGE_SIZE) + offset_argv;
-
-        // Copy strings
-        char *current_kva_str = kva_str_base;
-        uintptr_t current_uva_str = uva_str_base;
-
-        for (int i = 0; i < argc; ++i) {
-            strcpy(current_kva_str, argv[i]);
-            kva_argv_base[i] = (char*)current_uva_str; // Store User VA in the array
-            int len = strlen(argv[i]) + 1;
-            current_kva_str += len;
-            current_uva_str += len;
-        }
-        kva_argv_base[argc] = NULL;
-
-        // Calculate user_sp
-        new_pcb->user_sp = uva_argv_base;
-
-        // Context
-        init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, argc, (char **)new_pcb->user_sp, new_pcb);
+    /* 3. VM Setup */
+    if (mm_init_pcb_vm(new_pcb) != 0) {
+        bios_putstr(ANSI_FMT("ERROR: Failed to initialize VM.\n\r", ANSI_BG_RED));
+        return 0;
     }
 
-    // Initialize the PCB
+    /* 4. Load Binary */
+    uint64_t entry_point = map_task(name, new_pcb->pgdir);
+    if (entry_point == 0) return 0;
+
+    /* 5. Stack Allocation */
+    new_pcb->kernel_stack_base = allocPage(KERNEL_STACK_PAGES);
+    new_pcb->kernel_sp = new_pcb->kernel_stack_base + KERNEL_STACK_PAGES * PAGE_SIZE;
+
+    /* 6. User Stack & Args */
+    new_pcb->user_sp = mm_setup_user_stack(new_pcb, argc, argv);
+
+    /* 7. Context Initialization */
+    init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, 
+                   argc, (char **)new_pcb->user_sp, new_pcb);
+
+    /* 8. Final Setup */
     list_init(&new_pcb->wait_list);
     new_pcb->pid = process_id++;
     new_pcb->task_name = tasks[task_idx].name;
     new_pcb->status = TASK_READY;
-    new_pcb->remaining_workload = 1; // An initial value, avoid the first task to starve the CPU resources
-    new_pcb->cursor_x = 0;
-    new_pcb->cursor_y = process_id; // Give each task its own line
+    new_pcb->cpu_mask = (mask == 0) ? current_running->cpu_mask : mask;
+    
+    /* Metrics */
+    new_pcb->remaining_workload = 1;
     new_pcb->lap_count = 0;
+    new_pcb->cursor_x = 0;
+    new_pcb->cursor_y = new_pcb->pid;
 
-    // Set CPU mask for the new process
-    if (mask == 0) {
-        new_pcb->cpu_mask = current_running->cpu_mask;
-    } else {
-        new_pcb->cpu_mask = mask;
-    }
-
-    // NOTE: This makes the following content is obsolete in virtual memory scenario
-    if (!CONFIG_VMEM_LOADING) {
-
-        new_pcb->kernel_sp = new_pcb->kernel_stack_base + KERNEL_STACK_PAGES * PAGE_SIZE; // allocation handled in init_pcb()
-
-        // Tackle user_sp, copying actual string onto user stack
-        ptr_t user_stack_top = new_pcb->user_stack_base + USER_STACK_PAGES * PAGE_SIZE;
-
-        int total_len = 0;
-        for (int i = 0; i < argc; ++i) {
-        total_len += strlen(argv[i]) + 1;
-        }
-
-        // Address for args string buffer and argv array
-        char *str_buf = (char *)user_stack_top - total_len;
-        char *current_str = str_buf;
-        char **new_argv = (char **)(current_str - (argc + 1) * sizeof(char *));
-
-        for (int i = 0; i < argc; ++i) {
-        strcpy(current_str, argv[i]);
-        new_argv[i] = current_str;
-        current_str += strlen(argv[i]) + 1;
-        }
-        new_argv[argc] = NULL;
-
-        // AAlign the final stack pointer to a 16-byte boundary
-        ptr_t final_user_stack = (ptr_t)new_argv & ~0xF;
-
-        // Set the new_pcb's user stack pointer
-        new_pcb->user_sp = final_user_stack;
-
-        // Initialize the fake context on the stack
-        init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, argc, new_argv, new_pcb);
-    }
-
-    // Add the initialized PCB to the ready queue
+    /* 9. Enqueue */
     list_add_tail(&new_pcb->list, &ready_queue);
 
-    // Update global process_id and return
     return new_pcb->pid;
 }
 
-void do_exit(void)
-{
-
-    // Get current_running from macro
-    pcb_t *current_running = CURRENT_RUNNING;
-
-    // Mark the current process as exited
-    current_running->status = TASK_EXITED;
-
-    // Switch back to Kernel Page Table safely before releasing resources
-    set_satp(SATP_MODE_SV39, 0, PGDIR_PA >> NORMAL_PAGE_SHIFT);
-    local_flush_tlb_all();
-
-    // Unblock any waiting parent
-    if (!list_is_empty(&current_running->wait_list)) {
-        pcb_t *parent = list_entry(current_running->wait_list.next, pcb_t, list);
-        do_unblock(&parent->list);
-    }
-
-    // reschedule to run another task
-    do_scheduler();
-}
+/* -------------------------------------------------------------------------- */
+/*                            SYSTEM CALL HANDLERS                            */
+/* -------------------------------------------------------------------------- */
 
 pid_t do_getpid()
 {
     return CURRENT_RUNNING->pid;
 }
 
+void do_exit(void)
+{
+    pcb_t *current_running = CURRENT_RUNNING;
+
+    current_running->status = TASK_EXITED;
+
+    /* Free resources */
+    int pcb_index = current_running - pcb;
+    free_page_map_info(pcb_index);
+    free_all_pages(current_running);
+
+    /* Safe switch to kernel page table before release */
+    set_satp(SATP_MODE_SV39, 0, PGDIR_PA >> NORMAL_PAGE_SHIFT);
+    local_flush_tlb_all();
+
+    /* Wake up waiting parent */
+    if (!list_is_empty(&current_running->wait_list)) {
+        pcb_t *parent = list_entry(current_running->wait_list.next, pcb_t, list);
+        do_unblock(&parent->list);
+    }
+
+    do_scheduler();
+}
+
 int do_kill(pid_t pid)
 {
-    // Find the PCB in the pcb array
     pcb_t *target_pcb = NULL;
+    
+    /* Find target PCB */
     for (int i = 0; i < NUM_MAX_TASK; i++) {
         if (pcb[i].pid == pid && pcb[i].status != TASK_UNUSED && pcb[i].status != TASK_EXITED) {
             target_pcb = &pcb[i];
@@ -633,23 +539,21 @@ int do_kill(pid_t pid)
         }
     }
 
-    // Return an error if process was not found
-    if (target_pcb == NULL){
+    if (target_pcb == NULL) {
         printk("ERROR: Process with PID %d not found or already exited.\n", pid);
-        return 0; // Failure
+        return 0;
     }
 
-    // Release all locks held by the target process
-    // We must create a temporary copy of the locks to release, because
-    // do_mutex_lock_release will modify the target_pcb->held_locks array.
+    /* 
+     * Release held locks.
+     * Copy lock list first to allow safe modification during release.
+     */
     extern mutex_lock_t mlocks[LOCK_NUM];
     int locks_to_release[LOCK_NUM];
     int num_locks = target_pcb->num_held_locks;
     memcpy((uint8_t *)locks_to_release, (uint8_t *)target_pcb->held_locks, num_locks * sizeof(int));
 
     for (int i = 0; i < num_locks; i++) {
-        // We need a special, more direct release function here because the
-        // target process is not the 'current_running' one.
         int lock_idx = locks_to_release[i];
         mutex_lock_t *lock = &mlocks[lock_idx];
 
@@ -659,29 +563,27 @@ int do_kill(pid_t pid)
             pcb_t *waking_pcb = list_entry(node, pcb_t, list);
             do_unblock(&waking_pcb->list);
         }
-
         lock->status = UNLOCKED;
         spin_lock_release(&lock->lock);
     }
     target_pcb->num_held_locks = 0;
 
-
-    // Change the process's status to TASK_EXITED
+    /* Mark as exited */
     target_pcb->status = TASK_EXITED;
 
-    // If the task is blocked, remove it from any wait queue
+    /* Remove from queues if blocked/waiting */
     if (target_pcb->list.next != NULL && target_pcb->list.prev != NULL) {
         list_del(&target_pcb->list);
     }
 
-    // [P4-Task3] FIX: Clean up swap tracking info BEFORE freeing pages
+    /* [P4-Task3] Cleanup swap info before pages */
     int pcb_index = target_pcb - pcb;
     free_page_map_info(pcb_index);
 
-    // Free resources
+    /* Free memory */
     free_all_pages(target_pcb);
 
-    // Unblock any parent process waiting on this PID in waitpid.
+    /* Unblock waiting parent */
     if (!list_is_empty(&target_pcb->wait_list)) {
         pcb_t *parent = list_entry(target_pcb->wait_list.next, pcb_t, list);
         do_unblock(&parent->list);
@@ -689,17 +591,15 @@ int do_kill(pid_t pid)
 
     printk("[TASK] Process (pid=%d) has been killed.\n", pid);
 
-    return 1; // Success
+    return 1;
 }
 
 int do_waitpid(pid_t pid)
 {
-
-    // Get current_running from macro
     pcb_t *current_running = CURRENT_RUNNING;
-
-    // Find the required child process
     pcb_t *child_pcb = NULL;
+
+    /* Find child process */
     for (int i = 0; i < process_id; i++) {
         if (pcb[i].pid == pid) {
             child_pcb = &pcb[i];
@@ -707,33 +607,26 @@ int do_waitpid(pid_t pid)
         }
     }
 
-    // Return error if child process doesn't exist
     if (child_pcb == NULL) {
         bios_putstr(ANSI_FMT("ERROR: waitpid failed, required pid not found\n\r", ANSI_BG_RED));
-        // move cursor downwards
         screen_move_cursor(current_running->cursor_x, current_running->cursor_y + 1);
         bios_putstr(ANSI_FG_RED);
         printk("Target PID: %d\n", pid);
         bios_putstr(ANSI_NONE);
-        return 0; // Failure
+        return 0;
     }
 
-    // Check child's status
     if (child_pcb->status == TASK_EXITED) {
-        // Reap the zombie process
-
-        // Free memory resources here
+        /* Reap zombie process */
         free_all_pages(child_pcb);
 
-        // For now, we'll just clear the PCB to make it reusable
+        /* Reset PCB for reuse */
         child_pcb->pid = 0;
-        child_pcb->status = TASK_EXITED; // Set to exited to indicate it's free
+        child_pcb->status = TASK_EXITED;
         list_init(&child_pcb->wait_list);
-        // In a real OS, we would also free memory pages here.
     } else {
-        // move cursor downwards
+        /* Child active: Block parent */
         screen_move_cursor(0, current_running->cursor_y + 1);
-        // Child is still running, block the parent
         bios_putstr(ANSI_FG_YELLOW);
         printk("[INFO] Parent (pid = %d) is waiting for child (pid=%d).\n", current_running->pid, pid);
         bios_putstr(ANSI_NONE);
@@ -743,10 +636,52 @@ int do_waitpid(pid_t pid)
     return pid;
 }
 
-// This will handle `taskset -p mask pid`
+void do_sleep(uint32_t sleep_time)
+{
+    pcb_t *current_running = CURRENT_RUNNING;
+
+    /* 1. Block current task */
+    current_running->status = TASK_BLOCKED;
+    
+    /* 2. Set wakeup time */
+    current_running->wakeup_time = get_timer() + sleep_time;
+    
+    /* 3. Add to sleep queue and reschedule */
+    list_add_tail(&current_running->list, &sleep_queue);
+    do_scheduler();
+}
+
+void do_block(list_node_t *pcb_node, list_head *queue)
+{
+    pcb_t *pcb = list_entry(pcb_node, pcb_t, list);
+    pcb->status = TASK_BLOCKED;
+    list_add_tail(pcb_node, queue);
+
+    do_scheduler();
+}
+
+void do_unblock(list_node_t *pcb_node)
+{
+    pcb_t *pcb = list_entry(pcb_node, pcb_t, list);
+    pcb->status = TASK_READY;
+ 
+    list_del(pcb_node);
+    list_add_tail(pcb_node, &ready_queue);
+}
+
+void do_set_sche_workload(int workload)
+{
+    pcb_t *current_running = CURRENT_RUNNING;
+
+    /* New lap detection */
+    if (workload > current_running->remaining_workload + 60) {
+        current_running->lap_count++;
+    }
+    current_running->remaining_workload = workload;
+}
+
 void do_taskset(int mask, pid_t pid)
 {
-
     pcb_t *target_pcb = NULL;
     for (int i = 0; i < NUM_MAX_TASK; i++) {
         if (pcb[i].pid == pid) {
@@ -761,18 +696,15 @@ void do_taskset(int mask, pid_t pid)
     } else {
         printk("ERROR: taskset failed, PID %d not found.\n", pid);
     }
-
 }
 
 void do_thread_create(ptr_t func, uint64_t arg)
 {
-    // 1. Get current process
     pcb_t *current_running = CURRENT_RUNNING;
-
-    // 2. Find a free PCB
     pcb_t *new_pcb = NULL;
     int i;
-    // Simple search for free PCB
+
+    /* Find free PCB */
     for (i = 0; i < NUM_MAX_TASK; i++) {
         if (pcb[i].status == TASK_UNUSED || pcb[i].status == TASK_EXITED) {
             new_pcb = &pcb[i];
@@ -785,39 +717,62 @@ void do_thread_create(ptr_t func, uint64_t arg)
         return;
     }
 
-    // 3. Initialize PCB fields
-    // Basic Info
+    /* Initialize PCB */
     list_init(&new_pcb->wait_list);
     new_pcb->pid = process_id++;
     new_pcb->status = TASK_READY;
     new_pcb->cursor_x = current_running->cursor_x;
     new_pcb->cursor_y = current_running->cursor_y;
-    new_pcb->task_name = current_running->task_name; // Share name for now
-    new_pcb->cpu_mask = current_running->cpu_mask;   // Inherit affinity
+    new_pcb->task_name = current_running->task_name;
+    new_pcb->cpu_mask = current_running->cpu_mask;
     new_pcb->lap_count = current_running->lap_count;
-    new_pcb->remaining_workload = 1; // Default slice
+    new_pcb->remaining_workload = 1;
 
-    // 4. Stack Allocation
-    // IMPORTANT: We must allocate a NEW kernel stack and a NEW user stack 
-    // so the thread doesn't clobber the parent's stack.
-    
-    // Re-use the pcb's existing stack base pointers if they were allocated at init, 
-    // or alloc new ones if this PCB was recycled.
-    // In your current mm.c, alloc functions just increment a pointer, they don't support free.
-    // Assuming pcb[] array is static and stacks were pre-allocated or we just alloc new ones:
-    // new_pcb->kernel_stack_base = allocKernelPage(KERNEL_STACK_PAGES);
-    // new_pcb->user_stack_base = allocUserPage(USER_STACK_PAGES);
-    
+    /* Setup Stacks */
     new_pcb->kernel_sp = new_pcb->kernel_stack_base + KERNEL_STACK_PAGES * PAGE_SIZE;
     new_pcb->user_sp = new_pcb->user_stack_base + USER_STACK_PAGES * PAGE_SIZE;
 
-    // 5. Initialize Context (The "Fake" Stack Frame)
-    ptr_t kernel_stack = new_pcb->kernel_sp;
-    ptr_t user_stack = new_pcb->user_sp;
-    
-    // Call init_pcb_stack
-    init_pcb_stack(kernel_stack, user_stack, func, arg, NULL, new_pcb);
+    /* Initialize Context */
+    init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, func, arg, NULL, new_pcb);
 
-    // 6. Add to Ready Queue
+    /* Enqueue */
     list_add_tail(&new_pcb->list, &ready_queue);
+}
+
+static const char *get_status_string(task_status_t status)
+{
+    switch (status) {
+        case TASK_BLOCKED: return "BLOCKED";
+        case TASK_RUNNING: return "RUNNING";
+        case TASK_READY:   return "READY  ";
+        case TASK_EXITED:  return "EXITED ";
+        case TASK_UNUSED:  return "UNUSED ";
+        default:           return "UNKNOWN";
+    }
+}
+
+void do_process_show()
+{
+    bios_putstr(ANSI_FMT("[PROCESS TABLE]\n\r", ANSI_FG_GREEN));
+    bios_putstr(ANSI_FMT("PID   STATUS    KERNEL_SP             USER_SP        CPU    MASK    NAME\n\r", ANSI_FG_YELLOW));
+    bios_putstr(ANSI_FG_CYAN);
+
+    pcb_t *current_running = CURRENT_RUNNING;
+
+    screen_move_cursor(current_running->cursor_x, current_running->cursor_y + 2);
+
+    for (int i = 0; i < process_id; i++) {
+        if (pcb[i].status != TASK_EXITED && pcb[i].status != TASK_UNUSED) {
+            printk("%d     %s   0x%lx    0x%lx    0x%x    0x%x     %s\n",
+                   pcb[i].pid,
+                   get_status_string(pcb[i].status),
+                   pcb[i].kernel_sp,
+                   pcb[i].user_sp,
+                   pcb[i].on_cpu,
+                   pcb[i].cpu_mask,
+                   pcb[i].task_name);
+        }
+    }
+    printk("\n");
+    bios_putstr(ANSI_NONE);
 }

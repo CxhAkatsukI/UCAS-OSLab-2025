@@ -22,20 +22,18 @@
 #include <cmd.h>
 #include <csr.h>
 
-extern void ret_from_exception();
-
-// Flag to indicate whether core 1 has booted
-volatile int core1_booted = 0;
-
-// Task info array
+// [P1-Task1] Task info array
 task_info_t tasks[TASK_MAXNUM];
 int tasknum;
 int g_batch_file_start_sector;
 
-// Global buffer for passing I/O between batch tasks
+// [P1-Task5] Global buffer for passing I/O between batch tasks
 uint64_t batch_io_buffer_val;
 
-// Global variable for the address of swap area
+// [P3-Task4] Flag to indicate whether core 1 has booted
+volatile int core1_booted = 0;
+
+// [P4-Task3] Global variable for the address of swap area
 uint64_t image_end_sec;
 
 static void init_jmptab(void)
@@ -99,81 +97,6 @@ int search_task_name(int tasknum, char name[]) {
     return -1;
 }
 
-/**
- * @brief Launch a task based on task index (obsolete).
- */
-uint64_t user_input_and_launch_task_handler(int tasknum) {
-    // Prompt the user to input the task that he want to execute
-    bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE));
-    bios_putstr(ANSI_FMT("Please enter the task to execute: \n", ANSI_FG_YELLOW));
-    bios_putstr(ANSI_FMT("~> ", ANSI_FG_CYAN));
-
-
-    // Use BIOS API to read characters from console and echoes back ( •̀ ω •́ )✧)
-    int task_idx = 0;
-    char temp_task_idx_buf[] = "_____";
-    char temp_task_name_buf[32];
-    int task_name_buf_ptr = 0;
-    char *exec_task_idx_buf;
-    while (1) {
-        char input = bios_getchar();
-        if (input == '\n' || input == '\r') {
-            bios_putchar('\n');
-            bios_putchar('\r');
-            temp_task_name_buf[task_name_buf_ptr] = '\0';
-            int task_idx_by_name = search_task_name(tasknum, temp_task_name_buf);
-            if (task_idx_by_name != -1) {
-                task_idx = task_idx_by_name;
-                exec_task_idx_buf = itoa(task_idx, temp_task_idx_buf, 10);
-                break;
-            } else if (task_idx >= tasknum || task_idx < 0) {
-                // Prompt the user to input the task that he want to execute
-                bios_putstr(ANSI_FMT("ERROR: Invalid task index or name", ANSI_BG_RED));
-                bios_putstr(ANSI_FMT("\n\rInfo: ", ANSI_FG_BLUE));
-                bios_putstr(ANSI_FMT("Please enter the task to execute: \n", ANSI_FG_YELLOW));
-                bios_putstr(ANSI_FMT("~> ", ANSI_FG_CYAN));
-
-                // reset index and name buf pointer
-                task_idx = 0;
-                task_name_buf_ptr = 0;
-                continue;
-            } else {
-                exec_task_idx_buf = itoa(task_idx, temp_task_idx_buf, 10);
-                break;
-            }
-        }
-        if (input != 0xFF) {
-            task_idx *= 10;
-            task_idx += input - '0';
-            temp_task_name_buf[task_name_buf_ptr++] = input;
-            bios_putchar(input);
-        }
-    }
-
-    // Print success message
-    bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE) ANSI_FMT("Now executing task ", ANSI_FG_GREEN));
-    bios_putstr(ANSI_FG_CYAN);
-    bios_putstr(exec_task_idx_buf);
-    bios_putstr(", ");
-    bios_putstr(tasks[task_idx].name);
-    bios_putstr(ANSI_NONE);
-    bios_putstr(ANSI_FMT("\n", ANSI_FG_GREEN));
-
-    // Print success message
-    bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE) ANSI_FMT("Windows is loading files...\n\r", ANSI_FG_GREEN));
-    uint64_t entry_point = load_task_img(tasks[task_idx].name, tasknum, (ptr_t)TASK_MEM_BASE);
-
-    // enter the entry point
-    char *temp_index_buf = "____________";
-    bios_putstr(ANSI_FMT("Info: ", ANSI_FG_BLUE) ANSI_FMT("Starting task at entry point", ANSI_FG_GREEN));
-    bios_putstr(ANSI_FG_CYAN);
-    bios_putstr(itoa(entry_point, temp_index_buf, 16));
-    bios_putstr(ANSI_NONE);
-    ((void (*)(void))entry_point)();
-
-    return 0;
-}
-
 /************************************************************/
 void init_pcb_stack(
     ptr_t kernel_stack, ptr_t user_stack, ptr_t entry_point, int argc, char *argv[],
@@ -227,37 +150,8 @@ void init_pcb_stack(
 
 static void init_pcb(void)
 {
-    // /* TODO: [p2-task1] load needed tasks and init their corresponding PCB */
-    // ptr_t next_task_addr = TASK_MEM_BASE;
-    // tasknum = *(short *)TASK_NUM_LOC; // Ensure tasknum is loaded
+    /* TODO: [p2-task1] load needed tasks and init their corresponding PCB */
 
-    // for (int i = 0; i < tasknum; i++) {
-    //     // Load the task into memory at the next available address
-    //     ptr_t entry_point = load_task_img(tasks[i].name, tasknum, next_task_addr);
-        
-    //     // Get a free PCB
-    //     pcb_t *new_pcb = &pcb[process_id];
-
-    //     // Initialize the PCB
-    //     new_pcb->kernel_sp = allocKernelPage(KERNEL_STACK_PAGES) + KERNEL_STACK_PAGES * PAGE_SIZE;
-    //     new_pcb->user_sp = allocUserPage(USER_STACK_PAGES) + USER_STACK_PAGES * PAGE_SIZE;
-    //     new_pcb->pid = process_id++;
-    //     new_pcb->status = TASK_READY;
-    //     new_pcb->cursor_x = 0;
-    //     new_pcb->cursor_y = i; // Give each task its own line to start
-
-    //     // Initialize the stack for the first run
-    //     init_pcb_stack(new_pcb->kernel_sp, new_pcb->user_sp, entry_point, new_pcb);
-
-    //     // Add the PCB to the ready queue
-    //     list_add_tail(&new_pcb->list, &ready_queue);
-
-    //     // Update the next available task address, page-aligned
-    //     next_task_addr += tasks[i].byte_size;
-    //     next_task_addr = (next_task_addr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-    // }
-
-    /* TODO: [p2-task1] remember to initialize 'current_running' */
     for (int i = 0; i < NUM_MAX_TASK; i++) {
         pcb[i].status = TASK_UNUSED;
         pcb[i].pid = -1;
@@ -267,11 +161,23 @@ static void init_pcb(void)
         pcb[i].user_stack_base = allocUserPage(USER_STACK_PAGES);
     }
 
+    // Set pgdir for `pid0_pcb`
+    pid0_pcb.pgdir = allocPage(1);
+    clear_pgdir(pid0_pcb.pgdir);
+    share_pgtable(pid0_pcb.pgdir, pa2kva(PGDIR_PA));
+
+    // Set pgdir for `s_pid0_pcb`
+    s_pid0_pcb.pgdir = allocPage(1);
+    clear_pgdir(s_pid0_pcb.pgdir);
+    share_pgtable(s_pid0_pcb.pgdir, pa2kva(PGDIR_PA));
+
+    /* TODO: [p2-task1] remember to initialize 'current_running' */
+
     // Populate the CPU array with default PCBs
     cpu_table[0].current_running = &pid0_pcb;
     cpu_table[1].current_running = &s_pid0_pcb;
 
-    // NOTE: Call init_pcb_stack() to set up switch _to context for default PCBs
+    // NOTE: Call init_pcb_stack() to set up switch_to context for default PCBs
 
     // `current_running` setting is now handled by `set_current_running()` at the start of main
     // current_running = cpu_table[0].current_running;
@@ -417,8 +323,6 @@ int main(void)
         // TODO: [p2-task4] Setup timer interrupt and enable all interrupt globally
         // NOTE: The function of sstatus.sie is different from sie's
 
-
-
         // TODO: Load tasks by either task id [p1-task3] or task name [p1-task4],
         //   and then execute them.
 
@@ -481,9 +385,8 @@ int main(void)
             *(short *)(pa2kva(LOGO_HAS_PRINTED)) = 1;
         }
 
-        // Unlock the lock, initialization is done
-        // WARNING: Prevent spinning while acquiring
-        // the BKL in exception_handler_entry
+        // WARNING: Before the first user program
+        // launches, Core 0 always holds the BKL.
         // unlock_kernel();
 
         // Run main command parsing and executing loop

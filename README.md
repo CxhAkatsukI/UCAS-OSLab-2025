@@ -1,58 +1,50 @@
-# Project 3: Process Management, Communication, and Multicore
+# Project 4: Virtual Memory Management
 
 **University of Chinese Academy of Sciences - Operating System (RISC-V)**
 
 ## 1. Overview
-
-This project transforms the basic kernel from Project 2 into a fully functional, interactive, and symmetric multi-processing (SMP) operating system. It introduces a user shell, comprehensive process management (creation, termination, synchronization), inter-process communication (IPC) primitives, and multicore scheduling with CPU affinity support.
+This project implements a complete Virtual Memory subsystem for the UCAS-OS kernel using the RISC-V **Sv39** paging mode. It transitions the OS from physical addressing to virtual addressing, providing memory isolation, demand paging, page swapping, and high-performance zero-copy IPC.
 
 ## 2. Implemented Features
 
-### Task 1: Shell and Process Management
-*   **Interactive Shell:** A user-mode process (PID 1) that accepts commands, parses arguments, and executes programs. Supports **Backspace** for editing.
+### Task 1: Virtual Memory Enabler
+*   **Sv39 Paging:** Configured `satp` to enable 3-level page tables.
+*   **Kernel High Mapping:** The kernel executes in the higher half (`0xffffffc0...`), mapped to physical memory (`0x50200000...`).
+*   **User Space Isolation:** Each process has a unique Page Directory (PGD). User programs are loaded at virtual address `0x10000`.
+*   **Argument Passing:** `exec` copies command-line arguments to the top of the new process's User Stack in virtual memory.
+
+### Task 2: Demand Paging
+*   **Lazy Allocation:** Physical memory is not allocated during `exec`. Instead, page table entries are populated only when the CPU triggers a **Page Fault** (Exceptions 12/13/15).
+*   **Dynamic Mapping:** The `handle_page_fault` handler automatically allocates pages and updates the TLB.
+
+### Task 3: Page Swapping
+*   **SD Card Backing:** When physical memory is exhausted, pages are swapped out to a dedicated Swap Area on the SD card.
+*   **FIFO Replacement:** Implemented a First-In-First-Out eviction policy using `in_mem_list` and `swap_out_list`.
+*   **Transparent Recovery:** Accessing a swapped-out page triggers a fault, automatically restoring data from the SD card to RAM.
+
+### Task 4: Memory Monitor
+*   **`free` Command:** Added a shell command to visualize system memory usage.
+*   **Visual Output:** Displays a color-coded progress bar and detailed statistics (Used/Free/Total) in MB.
+
+### Task 5: Zero-Copy IPC (Page Pipe)
+*   **Mechanism:** Allows transferring large data buffers between processes without `memcpy`.
 *   **System Calls:**
-    *   `sys_exec`: Loads programs from the SD card image. Supports **command-line argument passing** (argc/argv) by copying data to the new process's user stack.
-    *   `sys_exit`: Terminates a process and wakes up the parent.
-    *   `sys_waitpid`: Blocks the parent process until a specific child process exits.
-    *   `sys_kill`: Forcefully terminates a process and **releases its held locks** to prevent system deadlocks.
-    *   `sys_ps`: Lists running processes, their status, and CPU affinity.
-    *   `sys_clear`: Clears the terminal screen.
-
-### Task 2: Synchronization Primitives
-*   **Barriers:** Synchronizes a group of $N$ processes at a specific point. Processes block until all members arrive.
-*   **Condition Variables:** Allows processes to sleep until a specific condition is met, releasing the associated mutex atomically while waiting.
-*   **Mailboxes (IPC):** A bounded circular buffer mechanism protected by mutexes and condition variables (Not Full / Not Empty), allowing processes to send and receive messages.
-
-### Task 3: Multicore Support (SMP)
-*   **Dual-Core Boot:** Bootloader logic modified to initialize Hart 0 (Main) and wake up Hart 1 (Secondary) via IPI (Inter-Processor Interrupt).
-*   **Per-CPU Data:** Implemented `cpu_table` and usage of the `tp` register to track `current_running` tasks independently for each core.
-*   **Big Kernel Lock (BKL):** A global spinlock (`kernel_lock`) ensures only one core accesses kernel data structures (like the ready queue) at a time.
-*   **Timer Interrupts:** Both cores handle timer interrupts independently to support preemptive scheduling.
-
-### Task 4: CPU Affinity
-*   **CPU Mask:** Added `cpu_mask` to the PCB. The scheduler filters tasks based on the current core ID and the task's allowed mask.
-*   **`taskset` Command:**
-    *   `taskset mask name [args]`: Launches a program pinned to specific cores.
-    *   `taskset -p mask pid`: Changes the affinity of a running process.
-
-### Task 5: Kernel Threads & Deadlock Prevention
-*   **Deadlock Scenario:** Two processes attempting to send data to each other's full mailboxes simultaneously result in a circular wait ("Hold and Wait").
-*   **Threading Mechanism:** Implemented `sys_thread_create` (Kernel-Supported Threads). Threads share the parent's code and attributes but possess unique Kernel/User stacks.
-*   **Solution:** By splitting "Send" and "Receive" logic into separate threads, the receiver thread can run (and clear the mailbox) even if the sender thread is blocked, thus resolving the deadlock.
+    *   `sys_pipe_give_pages`: Unmaps physical pages from the sender.
+    *   `sys_pipe_take_pages`: Remaps those specific physical pages to the receiver.
+*   **Performance:** Significantly outperforms standard Mailbox IPC for large transfers (verified via `ipc` test).
 
 ## 3. How to Build and Run
 
 ### Prerequisites
 *   RISC-V Toolchain (gcc, gdb, qemu)
-*   Linux environment
+*   SD Card Image (created via `createimage`)
 
 ### Compilation
-To build the kernel, user libraries, and test programs:
 ```bash
 make clean
 make
 ```
-*Note: `NUM_MAX_TASK` was increased to 32 to support thread creation.*
+*Note: The linker script and `createimage` tool have been updated to support the new memory layout and swap partition.*
 
 ### Running
 **Single Core Mode:**
@@ -65,60 +57,53 @@ make run
 make run-smp
 ```
 
-## 4. Test Guide & Verification
+**Memory Limit Testing:**
+To verify swapping, you can artificially limit the physical page count in `kernel/mm/mm.c`:
+```c
+#define KERN_PAGE_MAX_NUM 4 // Force heavy swapping
+```
 
-Once the OS boots, you will enter the interactive shell (`> root@UCAS_OS:`).
+## 4. Test Guide
 
-### Task 1: Process Management
-*   **Execution:** `exec print1`
-*   **Background:** `exec print1 &` (Shell returns immediately)
-*   **Wait:** `exec waitpid` (Tests parent waiting for child)
-*   **Kill:** Start a loop task (`exec print1 &`), get its PID via `ps`, then `kill <pid>`.
+Once the OS boots into the shell (`> root@UCAS_OS:`):
 
-### Task 2: Synchronization
-*   **Barrier:** `exec barrier` (3 tasks synchronize loop iterations).
-*   **Condition Vars:** `exec condition` (Producer-Consumer model).
-*   **Mailbox:** `exec mbox_server &` then `exec mbox_client &` (Communication verification).
+### 1. Basic Execution (VM Verification)
+```bash
+exec shell
+```
+*Effect:* Starts a sub-shell. If VM is working, this proves process isolation and basic mapping are functional.
 
-### Task 3: Multicore
-1.  Run `make run-smp`.
-2.  Execute `exec multicore`.
-3.  Observe the speedup comparison between Single Core calculation and Multi Core calculation.
+### 2. Swap Mechanism
+```bash
+exec swap 0x10000000 0x20000000 0x30000000 0x40000000 0x50000000
+```
+*Effect:* Writes to 5 different pages (exceeding the artificial 4-page limit).
+*Observation:* You should see logs like `Swapping memory at ... onto disk`. Data integrity is verified by reading the values back.
 
-### Task 4: Affinity
-1.  Run `taskset 0x1 affinity` (Pins logic to Core 0).
-2.  Use `ps` to verify `CPU` column is 0.
-3.  Pick a child PID and run `taskset -p 0x2 <pid>`.
-4.  Verify in `ps` that it migrated to Core 1.
+### 3. Memory Monitor
+```bash
+free
+```
+*Effect:* Displays a graphical bar of memory usage.
 
-### Task 5: Deadlock & Threads
-1.  **Reproduce Deadlock:** `exec deadlock`. (System will hang as A and B block on send).
-2.  **Verify Solution:** `exec deadlock_sol`. (Uses threads; A and B complete successfully).
+### 4. Zero-Copy IPC Performance
+```bash
+exec ipc
+```
+*Effect:* Runs a benchmark comparing Mailbox vs. Pipe.
+*Observation:* The Pipe test should complete significantly faster for large payloads (e.g., 16MB) because it avoids data copying.
 
 ## 5. Key Design Decisions
 
-### 5.1. The "Fake Context" & BKL Release
-One of the hardest challenges in SMP is managing the Big Kernel Lock during context switches.
-*   **Problem:** When Process A switches to a **newly created** Process B, B starts at `ret_from_exception` and never executes the `unlock_kernel()` call that usually follows `switch_to`. This causes a deadlock.
-*   **Solution:** We introduced a wrapper `fake_switch_to_context` in `entry.S`. New processes are initialized with `ra` pointing to this wrapper. It explicitly calls `unlock_kernel` before jumping to `ret_from_exception`, ensuring the lock acquired by the previous process is released.
+### 5.1. SMP Boot Synchronization
+Enabling VM on multi-core is tricky. We implemented a strict handshake:
+1.  **Core 0** sets up the kernel page table and wakes Core 1.
+2.  **Core 1** wakes up, **re-maps** the identity mapping (crucial fix), enables `satp`, and signals Core 0.
+3.  **Core 0** waits for the signal before removing the temporary low-memory mapping.
+This prevents Core 1 from crashing due to missing instruction mappings during boot.
 
-### 5.2. Argument Passing
-To support `argc` and `argv` for A-Core requirements, `do_exec` calculates the size of the arguments, copies the strings to the **top of the new process's user stack**, creates the pointer array, and passes the count and array pointer into registers `a0` and `a1` of the trap frame. `crt0.S` retrieves these before calling `main`.
+### 5.2. Allocator Safety
+We adjusted `INIT_KERNEL_STACK` to `0xffffffc052000000`. This forces the physical memory allocator to start issuing pages from `0x52001000` onwards. This protects the Kernel Image (`0x5020xxxx`) and the Master Page Directory (`0x51000000`) from being accidentally allocated to user processes, which previously caused the `0xDEADBEEF` corruption crash.
 
-### 5.3. Thread Implementation
-Threads are implemented as lightweight processes (1:1 mapping). `do_thread_create`:
-1.  Allocates a new PCB.
-2.  Allocates **new** Kernel and User stacks (crucial for concurrency).
-3.  Inherits `cpu_mask` and `pid` management from the parent logic.
-4.  Reuses `init_pcb_stack` by casting the thread argument to `a0`.
-5.  Explicitly initializes `wait_list` to prevent kernel crashes when threads exit.
-
-## 6. File Structure Highlights
-
-*   `arch/riscv/kernel/entry.S`: Trap handling, Context Switch, `fake_switch_to_context`.
-*   `init/main.c`: Kernel entry, SMP boot sequence, Syscall initialization.
-*   `kernel/sched/sched.c`: Scheduler, `do_exec`, `do_thread_create`, Affinity logic.
-*   `kernel/smp/smp.c`: Big Kernel Lock implementation.
-*   `kernel/ipc/mailbox.c`: Mailbox implementation.
-*   `test/shell.c`: User-space shell implementation.
-*   `test/test_project3/`: Test cases (deadlock, affinity, etc.).
+### 5.3. Swap Management
+We use a `alloc_info_t` structure to track the state of every user page. This structure persists even when the page is on disk. When a process exits (`do_exit` or `do_kill`), we traverse the global swap lists to reclaim both the physical pages (if resident) and the tracking structures, ensuring no resource leaks.

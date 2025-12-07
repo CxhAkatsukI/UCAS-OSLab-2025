@@ -24,7 +24,7 @@ void interrupt_helper(regs_context_t *regs, uint64_t stval, uint64_t scause)
     disable_preempt();
     uint64_t exc_code = scause & (~SCAUSE_IRQ_FLAG);
     if ((scause & SCAUSE_IRQ_FLAG) > 0) {
-        int disable_print = 0; // (exc_code == IRQC_S_TIMER);
+        int disable_print = (exc_code == IRQC_S_TIMER);
         if (!disable_print)
             klog("IRQ received, code: %d\n", exc_code); // Log the IRQ code
         ((handler_t)irq_table[exc_code])(regs, stval, scause);
