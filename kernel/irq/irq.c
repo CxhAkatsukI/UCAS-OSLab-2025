@@ -38,6 +38,10 @@ void interrupt_helper(regs_context_t *regs, uint64_t stval, uint64_t scause)
     enable_preempt();
 }
 
+// Helper variables to control handle_irq_timer behavior
+int core_1_scheduled = 0;
+int core_0_scheduled = 0;
+
 void handle_irq_timer(regs_context_t *regs, uint64_t stval, uint64_t scause)
 {
     // TODO: [p2-task4] clock interrupt handler.
@@ -53,7 +57,11 @@ void handle_irq_timer(regs_context_t *regs, uint64_t stval, uint64_t scause)
         // We MUST NOT try to schedule, or we will deadlock on the BKL.
         // We simply return. The interrupted kernel code (syscall) will continue,
         // finish its work, and release the BKL.
-        ;
+        if (!list_is_empty(&ready_queue)
+        && ((!core_1_scheduled && get_current_cpu_id() == 1)
+        ||  (!core_0_scheduled && get_current_cpu_id() == 0))) {
+            do_scheduler();
+        }
     } else {
         do_scheduler();
     }

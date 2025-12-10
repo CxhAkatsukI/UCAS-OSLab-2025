@@ -237,6 +237,9 @@ ENTRY(ret_from_exception)
   // Unlock ther kernel first
   call unlock_kernel
 
+  // Call enable_peempt after unlock_kernel to prevent deadlock
+  call enable_preempt
+
   /* TODO: [p2-task3] restore context via provided macro and return to sepc */
   /* HINT: remember to check your sp, does it point to the right address? */
   RESTORE_CONTEXT
@@ -258,6 +261,9 @@ ENTRY(exception_handler_entry)
 
   /* TODO: [p2-task3] save context via the provided macro */
   SAVE_CONTEXT
+
+  // Call disable_preempt berfore lock_kernel
+  call disable_preempt
 
   // Call lock_kernel to save kernel resources
   call lock_kernel

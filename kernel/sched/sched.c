@@ -4,6 +4,7 @@
 #include <screen.h>
 #include <printk.h>
 
+#include <os/irq.h>
 #include <os/task.h>
 #include <os/kernel.h>
 #include <os/smp.h>
@@ -231,6 +232,18 @@ static void perform_switch_hooks(pcb_t *prev, pcb_t *next, uint64_t core_id)
      */
     set_satp(SATP_MODE_SV39, next->pid, kva2pa(next->pgdir) >> NORMAL_PAGE_SHIFT);
     local_flush_tlb_all();
+
+    /* Set helper flags for handle_irq_timer */
+    if (next->pid != 0 && get_current_cpu_id() == 1) {
+        core_1_scheduled = 1;
+        klog("core_1_scheduled set to 1");
+    }
+
+    if (next->pid != 0 && get_current_cpu_id() == 0) {
+        core_0_scheduled = 1;
+        klog("core_0_scheduled set to 1");
+    }
+
 }
 
 /**
