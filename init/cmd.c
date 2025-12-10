@@ -888,9 +888,10 @@ int cmd_vexec(char *args)
     unlock_kernel();
 
     // --- Interrupt driven idle loop ---
-    enable_preempt();
-    do_scheduler();
-    asm volatile("wfi");
+    while (1) {
+        enable_preempt();
+        asm volatile("wfi");
+    }
 
     return 0;
 }

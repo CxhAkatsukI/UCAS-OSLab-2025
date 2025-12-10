@@ -1,3 +1,4 @@
+#include "os/list.h"
 #include <asm/unistd.h>
 #include <assert.h>
 #include <csr.h>
@@ -21,7 +22,7 @@ void interrupt_helper(regs_context_t *regs, uint64_t stval, uint64_t scause)
 {
     // TODO: [p2-task3] & [p2-task4] interrupt handler.
     // call corresponding handler by the value of `scause`
-    disable_preempt();
+    // disable_preempt();
     uint64_t exc_code = scause & (~SCAUSE_IRQ_FLAG);
     if ((scause & SCAUSE_IRQ_FLAG) > 0) {
         int disable_print = 0; // (exc_code == IRQC_S_TIMER);
@@ -35,8 +36,11 @@ void interrupt_helper(regs_context_t *regs, uint64_t stval, uint64_t scause)
             klog("Exception received, code: %d\n", exc_code); // Log the Exception code
         ((handler_t)exc_table[exc_code])(regs, stval, scause);
     }
-    enable_preempt();
+    // enable_preempt();
 }
+
+int core_1_scheduled = 0;
+int core_0_scheduled = 0;
 
 void handle_irq_timer(regs_context_t *regs, uint64_t stval, uint64_t scause)
 {
@@ -53,7 +57,11 @@ void handle_irq_timer(regs_context_t *regs, uint64_t stval, uint64_t scause)
         // We MUST NOT try to schedule, or we will deadlock on the BKL.
         // We simply return. The interrupted kernel code (syscall) will continue,
         // finish its work, and release the BKL.
-        ;
+        if (!list_is_empty(&ready_queue)
+        && ((!core_1_scheduled && get_current_cpu_id() == 1)
+        ||  (!core_0_scheduled && get_current_cpu_id() == 0))) {
+            do_scheduler();
+        }
     } else {
         do_scheduler();
     }

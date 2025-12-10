@@ -59,6 +59,10 @@ enum ExcCode
     EXCC_COUNT
 };
 
+// Helper variable to record whether core 1 has done its first schedule
+extern int core_1_scheduled;
+extern int core_0_scheduled;
+
 typedef void (*handler_t)(regs_context_t*, uint64_t, uint64_t);
 
 extern handler_t irq_table[IRQC_COUNT];

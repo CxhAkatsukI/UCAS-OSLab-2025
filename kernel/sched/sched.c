@@ -1,4 +1,5 @@
 #include "os/task.h"
+#include <os/irq.h>
 #include <os/kernel.h>
 #include <os/smp.h>
 #include <os/string.h>
@@ -216,6 +217,17 @@ void do_scheduler(void)
     // Set the task's on_cpu field for `ps` command
     if (prev_running->pid > 0) prev_running->on_cpu = 0xF;
     if (next_running->pid > 0) next_running->on_cpu = core_id;
+
+    // Set the scheduled helper variable
+    if (next_running->pid != 0 && get_current_cpu_id() == 1) {
+        core_1_scheduled = 1;
+        klog("core_1_scheduled set to 1");
+    }
+
+    if (next_running->pid != 0 && get_current_cpu_id() == 0) {
+        core_0_scheduled = 1;
+        klog("core_0_scheduled set to 1");
+    }
 
     // Log the decision made by the scheduler
     // klog("Scheduler on core %d picked task '%s' (PID %d) with mask 0x%x\n",
