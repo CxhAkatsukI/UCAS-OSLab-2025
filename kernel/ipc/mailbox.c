@@ -166,8 +166,6 @@ int do_mbox_send(int mbox_idx, void *msg, int msg_length)
 
     do_mutex_lock_acquire(mbox->lock_idx);
 
-    if (make_buffer_resident(msg, msg_length) != 0) return -1;
-
     for (int i = 0; i < msg_length; i++) {
         /* If buffer is full, we MUST wait. */
         while (mbox->used_space >= MAX_MBOX_LENGTH) {
@@ -181,6 +179,8 @@ int do_mbox_send(int mbox_idx, void *msg, int msg_length)
             do_condition_wait(mbox->not_full_cond_idx, mbox->lock_idx);
         }
 
+        /* Make sure the data resides in RAM */
+        make_buffer_resident(&data[i], 1);
         mbox->buffer[mbox->tail] = data[i];
         mbox->tail = (mbox->tail + 1) % MAX_MBOX_LENGTH;
         mbox->used_space++;
@@ -213,8 +213,6 @@ int do_mbox_recv(int mbox_idx, void *msg, int msg_length)
 
     do_mutex_lock_acquire(mbox->lock_idx);
 
-    if (make_buffer_resident(msg, msg_length) != 0) return -1;
-
     for (int i = 0; i < msg_length; i++) {
         /* If buffer is empty, we MUST wait. */
         while (mbox->used_space <= 0) {
@@ -228,6 +226,8 @@ int do_mbox_recv(int mbox_idx, void *msg, int msg_length)
             do_condition_wait(mbox->not_empty_cond_idx, mbox->lock_idx);
         }
 
+        /* Make sure the data resides in RAM */
+        make_buffer_resident(&data[i], 1);
         data[i] = mbox->buffer[mbox->head];
         mbox->head = (mbox->head + 1) % MAX_MBOX_LENGTH;
         mbox->used_space--;
