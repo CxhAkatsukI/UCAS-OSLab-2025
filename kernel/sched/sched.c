@@ -327,6 +327,10 @@ void do_scheduler(void)
     /* 1. Wake up expired tasks from sleep queue */
     check_sleeping();
 
+    /************************************************************/
+    // TODO: [p5-task3] Check send/recv queue to unblock PCBs
+    /************************************************************/
+
     /* 2. Re-enqueue current task if it was preempted (not blocked/exited) */
     sched_enqueue_prev(prev);
 

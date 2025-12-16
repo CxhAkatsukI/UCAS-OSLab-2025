@@ -1,10 +1,10 @@
+#include <time.h>
 #include <mailbox.h>
 #include <pthread.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <unistd.h>
 
 #define BUFFER_LENGTH (4*(MAX_MBOX_LENGTH))
