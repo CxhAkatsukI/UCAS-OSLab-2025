@@ -38,6 +38,7 @@
 #define S_INIT_KERNEL_STACK 0xffffffc050600000
 #define INIT_USER_STACK 0x52500000
 #define FREEMEM_KERNEL (INIT_KERNEL_STACK+PAGE_SIZE)
+#define FREEMEM_USER INIT_USER_STACK
 
 // TODO: [P4-Task3] Swap Constants
 extern uint64_t image_end_sec;

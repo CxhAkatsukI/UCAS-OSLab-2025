@@ -47,10 +47,7 @@ ptr_t allocKernelPage(int numPage)
     return ret;
 }
 
-// NOTE: Only need for S-core to alloc 2MB large page
-#ifdef S_CORE
-static ptr_t largePageMemCurr = LARGE_PAGE_FREEMEM;
-ptr_t allocLargePage(int numPage)
+ptr_t allocUserPage(int numPage)
 {
     /* Align to PAGE_SIZE */
     ptr_t ret = ROUND(userMemCurr, PAGE_SIZE);

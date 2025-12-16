@@ -3,10 +3,7 @@
 
 #include <stdint.h>
 typedef int32_t pid_t;
-<<<<<<< HEAD
 typedef pid_t pthread_t;
-=======
->>>>>>> 6486783a825dd42ca7e8ba5b3198bddc0eefac3e
 typedef uint64_t size_t;
 
 void sys_sleep(uint32_t time);
