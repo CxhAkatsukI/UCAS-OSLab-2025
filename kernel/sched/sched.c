@@ -1,6 +1,8 @@
+#include "os/net.h"
 #include <type.h>
 #include <assert.h>
 #include <cmd.h>
+#include <e1000.h>
 #include <screen.h>
 #include <printk.h>
 
@@ -236,12 +238,12 @@ static void perform_switch_hooks(pcb_t *prev, pcb_t *next, uint64_t core_id)
     /* Set helper flags for handle_irq_timer */
     if (next->pid != 0 && get_current_cpu_id() == 1) {
         core_1_scheduled = 1;
-        klog("core_1_scheduled set to 1");
+        /* klog("core_1_scheduled set to 1"); */
     }
 
     if (next->pid != 0 && get_current_cpu_id() == 0) {
         core_0_scheduled = 1;
-        klog("core_0_scheduled set to 1");
+        /* klog("core_0_scheduled set to 1"); */
     }
 
 }

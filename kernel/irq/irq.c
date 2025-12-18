@@ -1,14 +1,17 @@
 #include <asm/unistd.h>
 #include <assert.h>
 #include <csr.h>
+#include <e1000.h>
 #include <os/debug.h>
 #include <os/irq.h>
 #include <os/kernel.h>
 #include <os/mm.h>
+#include <os/net.h>
 #include <os/sched.h>
 #include <os/smp.h>
 #include <os/string.h>
 #include <os/time.h>
+#include <plic.h>
 #include <pgtable.h>
 #include <printk.h>
 #include <screen.h>
@@ -21,7 +24,6 @@ void interrupt_helper(regs_context_t *regs, uint64_t stval, uint64_t scause)
 {
     // TODO: [p2-task3] & [p2-task4] interrupt handler.
     // call corresponding handler by the value of `scause`
-    disable_preempt();
     uint64_t exc_code = scause & (~SCAUSE_IRQ_FLAG);
     if ((scause & SCAUSE_IRQ_FLAG) > 0) {
         int disable_print = (exc_code == IRQC_S_TIMER);
@@ -35,12 +37,13 @@ void interrupt_helper(regs_context_t *regs, uint64_t stval, uint64_t scause)
             klog("Exception received, code: %d\n", exc_code); // Log the Exception code
         ((handler_t)exc_table[exc_code])(regs, stval, scause);
     }
-    enable_preempt();
 }
 
 // Helper variables to control handle_irq_timer behavior
 int core_1_scheduled = 0;
 int core_0_scheduled = 0;
+
+extern void net_timer_check(void);
 
 void handle_irq_timer(regs_context_t *regs, uint64_t stval, uint64_t scause)
 {
@@ -49,6 +52,9 @@ void handle_irq_timer(regs_context_t *regs, uint64_t stval, uint64_t scause)
     if (!CONFIG_TIMESLICE_FINETUNING) {
         bios_set_timer(get_ticks() + TIMER_INTERVAL);
     }
+
+    /* Wake up network tasks to check for reliable transport timeouts */
+    net_timer_check();
 
     // FIX: Did we come from Kernel Mode?
     // We check the saved 'sstatus' register in the context.
@@ -89,6 +95,21 @@ void handle_irq_ext(regs_context_t *regs, uint64_t stval, uint64_t scause)
 {
     // TODO: [p5-task4] external interrupt handler.
     // Note: plic_claim and plic_complete will be helpful ...
+
+    /* Claim the interrupt from PLIC */
+    uint32_t irq = plic_claim();
+
+    if (irq == PLIC_E1000_PYNQ_IRQ || irq == PLIC_E1000_QEMU_IRQ) {
+        /* Dispatch to Network Driver */
+        net_handle_irq();
+    } else if (irq != 0) {
+        klog("Unknown external interrupt: %d\n", irq);
+    }
+
+    /* Complete the interrupt */
+    if (irq) {
+        plic_complete(irq);
+    }
 }
 
 void init_exception()
@@ -103,6 +124,10 @@ void init_exception()
     /* TODO: [p2-task4] initialize irq_table */
     /* NOTE: handle_int, handle_other, etc.*/
     irq_table[IRQC_S_TIMER]          = (handler_t)&handle_irq_timer;
+
+    /* TODO: [p5-task3] register external interrupt handler */
+    irq_table[IRQC_S_EXT]            = (handler_t)&handle_irq_ext;
+    irq_table[IRQC_M_EXT]            = (handler_t)&handle_irq_ext;
 
     /* TODO: [p2-task3] set up the entrypoint of exceptions */
     setup_exception();

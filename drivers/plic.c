@@ -83,8 +83,8 @@ int plic_init(uint64_t plic_regs_addr, uint32_t nr_irqs)
     }
 
     handler->present     = true;
-    handler->hart_base   = plic_regs + CONTEXT_BASE;
-    handler->enable_base = plic_regs + ENABLE_BASE;
+    handler->hart_base   = plic_regs + CONTEXT_BASE + CONTEXT_PER_HART;
+    handler->enable_base = plic_regs + ENABLE_BASE + ENABLE_PER_HART;
 
 done:
     /* priority must be > threshold to trigger an interrupt */

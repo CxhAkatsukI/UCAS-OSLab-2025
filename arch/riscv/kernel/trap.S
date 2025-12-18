@@ -14,7 +14,7 @@ ENTRY(setup_exception)
 
   // Global interrupt will be handled in `cmd_twrq`
   // Enable Supervisor Timer Interrupts
-  // li t0, SIE_STIE
+  // li t0, SIE_STIE | SIE_SEIE
   // csrs sie, t0
 
 ENDPROC(setup_exception)

@@ -15,9 +15,11 @@
 #include <os/mm.h>
 #include <os/time.h>
 #include <os/ioremap.h>
+#include <os/net.h>
 #include <sys/syscall.h>
 #include <screen.h>
 #include <e1000.h>
+#include <plic.h>
 #include <printk.h>
 #include <assert.h>
 #include <type.h>
@@ -225,6 +227,9 @@ static void init_syscall(void)
     syscall[SYSCALL_PIPE_GIVE] = (long (*)())&do_pipe_give_pages;
     syscall[SYSCALL_PIPE_TAKE] = (long (*)())&do_pipe_take_pages;
     syscall[SYSCALL_THREAD_CREATE] = (long (*)())&do_thread_create;
+    syscall[SYSCALL_NET_SEND] = (long (*)())&do_net_send;
+    syscall[SYSCALL_NET_RECV] = (long (*)())&do_net_recv;
+    syscall[SYSCALL_NET_RECV_STREAM] = (long (*)())&do_net_recv_stream;
 }
 /************************************************************/
 
@@ -298,6 +303,14 @@ int main(void)
         // Init system call table (0_0)
         init_syscall();
         printk("> [INIT] System call initialized successfully.\n");
+
+        // Init PLIC
+        plic_init(plic_addr, nr_irqs);
+        printk("> [INIT] PLIC initialized successfully.\n");
+
+        // Init network device
+        e1000_init();
+        printk("> [INIT] E1000 device initialized successfully.\n");
 
         // Init screen (QAQ)
         init_screen();
@@ -416,6 +429,9 @@ int main(void)
 
         // Lock kernel
         lock_kernel();
+
+        // Initialize Reliable Transport Layer
+        init_reliable_layer();
 
         // Set core1_booted flag
         core1_booted = 1;

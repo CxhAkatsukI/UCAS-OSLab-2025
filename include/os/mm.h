@@ -43,26 +43,26 @@
 // TODO: [P4-Task3] Swap Constants
 extern uint64_t image_end_sec;
 
-// Limits for the replacement algorithm
-#define USER_PAGE_MAX_NUM 32768  // Max pages to track per user
-#define KERN_PAGE_MAX_NUM 16384  // Artificial limit: Only 64 MB allowed in memory!
+/* Limits for the replacement algorithm */
+#define USER_PAGE_MAX_NUM 32768  /* Max pages to track per user                     */
+#define KERN_PAGE_MAX_NUM 16384  /* Artificial limit: Only 64 MB allowed in memory! */
 
-// Structure to track page allocation info
+/* Structure to track page allocation info */
 typedef struct {
-    list_node_t lnode;    // Linked list node for FIFO queue
-    uintptr_t uva;        // User Virtual Address
-    uintptr_t pa;         // Physical Address (currently assigned)
-    int on_disk_sec;      // Sector index on disk (if swapped out)
-    int pgdir_id;         // Owner process ID (to distinguish shared pages)
+    list_node_t lnode;    /* Linked list node for FIFO queue                */
+    uintptr_t uva;        /* User Virtual Address                           */
+    uintptr_t pa;         /* Physical Address (currently assigned)          */
+    int on_disk_sec;      /* Sector index on disk (if swapped out)          */
+    int pgdir_id;         /* Owner process ID (to distinguish shared pages) */
 } alloc_info_t;
 
-// Global Arrays and Lists for Page Swapping
+/* Global Arrays and Lists for Page Swapping */
 extern alloc_info_t alloc_info[USER_PAGE_MAX_NUM];
-extern list_head in_mem_list;   // Pages currently in memory (FIFO queue)
-extern list_head swap_out_list; // Pages currently on disk
-extern list_head free_list;     // Unused tracking nodes
+extern list_head in_mem_list;   /* Pages currently in memory (FIFO queue) */
+extern list_head swap_out_list; /* Pages currently on disk                */
+extern list_head free_list;     /* Unused tracking nodes                  */
 
-// Page swapping function prototypes
+/* Page swapping function prototypes */
 extern void init_uva_alloc(void);
 extern uintptr_t alloc_limit_page_helper(uintptr_t va, uintptr_t pgdir);
 
@@ -96,6 +96,9 @@ ptr_t uva_allocPage(int numPage, uintptr_t uva);
 extern void share_pgtable(uintptr_t dest_pgdir, uintptr_t src_pgdir);
 extern uintptr_t alloc_page_helper(uintptr_t va, uintptr_t pgdir);
 
+/* TODO: [P5-task1] */
+int kernel_map_page_helper(uintptr_t va, uintptr_t pa, uintptr_t pgdir);
+
 // TODO: [P4-task3]: swap manager */
 void init_swp_mgr(void);
 void free_page_map_info(int pgdir_id);
@@ -105,25 +108,25 @@ size_t do_get_free_mem(void);
 uintptr_t shm_page_get(int key);
 void shm_page_dt(uintptr_t addr);
 
-// Pipe related data structure
+/* Pipe related data structure */
 #define PIPE_NAME_LEN 32
-#define PIPE_SIZE 4096 // Max pages the pipe can hold
+#define PIPE_SIZE 4096 /* Max pages the pipe can hold */
 
 typedef struct pipe {
     char name[PIPE_NAME_LEN];
     
-    // Circular buffer holding pointers to page tracking structures
-    // alloc_info_t is defined in mm.h, so you might need a void* here 
-    // or include mm.h carefully. void* is safer to avoid circular deps.
+    /* Circular buffer holding pointers to page tracking structures      */
+    /* alloc_info_t is defined in mm.h, so you might need a void* here   */
+    /* or include mm.h carefully. void* is safer to avoid circular deps. */
     void *page_buffer[PIPE_SIZE]; 
     
     int head;
     int tail;
-    int used_space; // Count of pages in pipe
+    int used_space; /* Count of pages in pipe */
 
-    int lock_idx;             // Mutex protection
-    int not_full_cond_idx;    // Wait if full
-    int not_empty_cond_idx;   // Wait if empty
+    int lock_idx;             /* Mutex protection */
+    int not_full_cond_idx;    /* Wait if full     */
+    int not_empty_cond_idx;   /* Wait if empty    */
 } pipe_t;
 
 #define PIPE_NUM 10
@@ -134,13 +137,13 @@ int do_pipe_open(char *name);
 long do_pipe_give_pages(int pipe_idx, void *src, size_t length);
 long do_pipe_take_pages(int pipe_idx, void *dst, size_t length);
 
-// Helper to check if a virtual address has a valid mapping/tracking info
+/* Helper to check if a virtual address has a valid mapping/tracking info */
 void *get_page_info(uintptr_t uva, uintptr_t pgdir);
 
-// Helper for Sender: Unmap page and return its tracking info
+/* Helper for Sender: Unmap page and return its tracking info */
 void *user_unmap_page(uintptr_t uva, uintptr_t pgdir);
 
-// Helper for Receiver: Take tracking info and map it to a new address
+/* Helper for Receiver: Take tracking info and map it to a new address */
 void user_map_page(uintptr_t uva, uintptr_t pgdir, void *page_info);
 
 

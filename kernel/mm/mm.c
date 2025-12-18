@@ -331,6 +331,49 @@ uintptr_t alloc_page_helper(uintptr_t va, uintptr_t pgdir)
     return pa2kva(get_pa(pte[vpn0]));
 }
 
+/**
+ * kernel_map_page_helper - Map a physical address to a virtual address using 2MB large pages.
+ * @va: Virtual Address to map.
+ * @pa: Physical Address to map to.
+ * @pgdir: Page Directory to update.
+ *
+ * This function modifies the PMD (Level 1) directly to create a 2MB mapping.
+ * It is primarily used for kernel space mappings where large pages are efficient.
+ *
+ * Return: 1 on success/update, 0 if PMD was already occupied by a non-large page table.
+ */
+int kernel_map_page_helper(uintptr_t va, uintptr_t pa, uintptr_t pgdir)
+{
+    va &= VA_MASK;
+    uint64_t vpn2 = va >> (NORMAL_PAGE_SHIFT + PPN_BITS + PPN_BITS);
+    uint64_t vpn1 = (vpn2 << PPN_BITS) ^ (va >> (NORMAL_PAGE_SHIFT + PPN_BITS));
+    
+    PTE *pgd = (PTE*)pgdir;
+    
+    /* 1. Check/Alloc Level 2 (PGD) */
+    if (pgd[vpn2] == 0) {
+        set_pfn(&pgd[vpn2], kva2pa(allocPage(1)) >> NORMAL_PAGE_SHIFT);
+        set_attribute(&pgd[vpn2], _PAGE_PRESENT);
+        clear_pgdir(pa2kva(get_pa(pgd[vpn2])));
+    }
+
+    /* 2. Check/Alloc Level 1 (PMD) */
+    PTE *pmd = (PTE *)pa2kva((get_pa(pgd[vpn2])));
+    if (pmd[vpn1] == 0) {
+        /* If we are unmapping (pa == 0), just clear it */
+        if (pa == 0) { 
+            pmd[vpn1] = 0; 
+            return 1; 
+        }
+        /* Map the 2MB Large Page directly to the physical address */
+        set_pfn(&pmd[vpn1], pa >> NORMAL_PAGE_SHIFT);
+        set_attribute(&pmd[vpn1], _PAGE_PRESENT | _PAGE_READ | _PAGE_WRITE |
+                                  _PAGE_EXEC | _PAGE_ACCESSED | _PAGE_DIRTY);
+        return 1;
+    }
+    return 0;
+}
+
 /* -------------------------------------------------------------------------- */
 /*                             SWAP MANAGER                                   */
 /* -------------------------------------------------------------------------- */

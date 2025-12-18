@@ -161,6 +161,7 @@ void do_sleep(uint32_t);
 
 void do_block(list_node_t *, list_head *queue);
 void do_unblock(list_node_t *);
+void check_and_unblock(list_head *queue);
 
 uint64_t calculate_timeslice(pcb_t *task_to_run, int min_lap_count);
 pcb_t *find_terminating_tasks(int min_lap_count);

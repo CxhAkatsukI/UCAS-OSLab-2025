@@ -24,7 +24,7 @@ static uint32_t buffer3[256] = {
     0x2300fb00, 0x84b7f28b, 0x00450008, 0x0000d400, 0x11ff0040, 0xa8c073d8,
     0x00e00101, 0xe914fb00, 0x0801e914, 0x0000};
 
-static int len[4] = {88, 88, 88, 88};
+static int len[4] = {226, 226, 226, 226};
 
 int main(void)
 {
