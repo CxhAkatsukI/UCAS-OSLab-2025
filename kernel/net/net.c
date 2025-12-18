@@ -288,7 +288,7 @@ int do_net_recv_stream(void *buffer, int *nbytes)
     int received = 0;
     uint8_t *user_ptr = (uint8_t *)buffer;
     uint64_t last_recv_time = get_ticks();
-    const uint64_t RECV_TIMEOUT = 100000000; 
+    const uint64_t RECV_TIMEOUT = 1000000; 
 
     while (received == 0) { // Only loop until we get AT LEAST one packet
         /* --- Step 1: Check Reorder Buffer --- */
