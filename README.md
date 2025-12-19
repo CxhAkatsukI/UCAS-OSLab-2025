@@ -1,109 +1,90 @@
-# Project 4: Virtual Memory Management
+# Project 5: Network Device Driver and Reliable Transport
 
 **University of Chinese Academy of Sciences - Operating System (RISC-V)**
 
 ## 1. Overview
-This project implements a complete Virtual Memory subsystem for the UCAS-OS kernel using the RISC-V **Sv39** paging mode. It transitions the OS from physical addressing to virtual addressing, providing memory isolation, demand paging, page swapping, and high-performance zero-copy IPC.
+This project implements a high-performance network subsystem for the UCAS-OS kernel. We developed a device driver for the Intel **82540EM (e1000)** NIC, integrated it with the **PLIC** for interrupt-driven I/O, and built a custom **Reliable Transport Protocol** to handle packet loss and out-of-order delivery in a virtualized network environment.
 
 ## 2. Implemented Features
 
-### Task 1: Virtual Memory Enabler
-*   **Sv39 Paging:** Configured `satp` to enable 3-level page tables.
-*   **Kernel High Mapping:** The kernel executes in the higher half (`0xffffffc0...`), mapped to physical memory (`0x50200000...`).
-*   **User Space Isolation:** Each process has a unique Page Directory (PGD). User programs are loaded at virtual address `0x10000`.
-*   **Argument Passing:** `exec` copies command-line arguments to the top of the new process's User Stack in virtual memory.
+### Task 1 & 2: NIC Driver & Polled I/O
+*   **MMIO via `ioremap`:** Implemented a kernel-space mapping utility using 2MB large pages to access NIC hardware registers at `0xffffffe0...`.
+*   **DMA Descriptor Rings:** Configured circular transmit (TX) and receive (RX) rings using the Legacy descriptor format.
+*   **Polled Transmission:** `e1000_transmit` handles buffer copying and tail pointer management.
+*   **Polled Reception:** `e1000_poll` retrieves data from hardware-owned buffers and recycles descriptors.
 
-### Task 2: Demand Paging
-*   **Lazy Allocation:** Physical memory is not allocated during `exec`. Instead, page table entries are populated only when the CPU triggers a **Page Fault** (Exceptions 12/13/15).
-*   **Dynamic Mapping:** The `handle_page_fault` handler automatically allocates pages and updates the TLB.
+### Task 3: Interrupt-Driven Networking
+*   **PLIC Integration:** Registered a top-level handler for `IRQ_S_EXT`. Implemented the Claim/Complete handshake to route interrupts to the NIC.
+*   **TXQE & RXDMT0:** Enabled hardware interrupts for "Transmit Queue Empty" and "Receive Descriptor Minimum Threshold" (triggered at 50% capacity).
+*   **Process Blocking:** Processes now call `do_block` when the TX queue is full or the RX queue is empty, significantly reducing CPU usage compared to polling.
 
-### Task 3: Page Swapping
-*   **SD Card Backing:** When physical memory is exhausted, pages are swapped out to a dedicated Swap Area on the SD card.
-*   **FIFO Replacement:** Implemented a First-In-First-Out eviction policy using `in_mem_list` and `swap_out_list`.
-*   **Transparent Recovery:** Accessing a swapped-out page triggers a fault, automatically restoring data from the SD card to RAM.
-
-### Task 4: Memory Monitor
-*   **`free` Command:** Added a shell command to visualize system memory usage.
-*   **Visual Output:** Displays a color-coded progress bar and detailed statistics (Used/Free/Total) in MB.
-
-### Task 5: Zero-Copy IPC (Page Pipe)
-*   **Mechanism:** Allows transferring large data buffers between processes without `memcpy`.
-*   **System Calls:**
-    *   `sys_pipe_give_pages`: Unmaps physical pages from the sender.
-    *   `sys_pipe_take_pages`: Remaps those specific physical pages to the receiver.
-*   **Performance:** Significantly outperforms standard Mailbox IPC for large transfers (verified via `ipc` test).
+### Task 4: Reliable Transport Protocol (Stream API)
+*   **Custom Protocol (Magic 0x45):** Implemented a transport layer supporting sequence numbers (`seq`), Acknowledgments (`ACK`), and Resend requests (`RSD`).
+*   **Reorder Buffer:** Created a 1024-slot buffer in the kernel to cache out-of-order packets, ensuring the user-space stream remains contiguous.
+*   **Stream Syscall:** `sys_net_recv_stream` provides a high-level API that abstracts away packet boundaries and network reliability issues.
+*   **Integrity Verification:** Developed `recv_file` using the **Fletcher-16** checksum algorithm to verify 100% data accuracy over lossy links.
 
 ## 3. How to Build and Run
 
 ### Prerequisites
 *   RISC-V Toolchain (gcc, gdb, qemu)
-*   SD Card Image (created via `createimage`)
+*   `tap0` network interface configured on the host machine.
 
 ### Compilation
 ```bash
 make clean
 make
 ```
-*Note: The linker script and `createimage` tool have been updated to support the new memory layout and swap partition.*
 
-### Running
-**Single Core Mode:**
-```bash
-make run
-```
-
+### Running with Networking
 **Multicore (SMP) Mode:**
 ```bash
-make run-smp
+make run-net
 ```
 
-**Memory Limit Testing:**
-To verify swapping, you can artificially limit the physical page count in `kernel/mm/mm.c`:
-```c
-#define KERN_PAGE_MAX_NUM 4 // Force heavy swapping
+**Debugging Mode:**
+```bash
+make debug-net
 ```
 
 ## 4. Test Guide
 
-Once the OS boots into the shell (`> root@UCAS_OS:`):
+Once the OS boots and you enter the shell:
 
-### 1. Basic Execution (VM Verification)
+### 1. Basic Transmit Test
 ```bash
-exec shell
+exec send
 ```
-*Effect:* Starts a sub-shell. If VM is working, this proves process isolation and basic mapping are functional.
+*Observation:* Check the host terminal running `tcpdump -i tap0`. You should see 4 packets of 226 bytes each being transmitted.
 
-### 2. Swap Mechanism
+### 2. Basic Receive Test
 ```bash
-exec swap 0x10000000 0x20000000 0x30000000 0x40000000 0x50000000
+exec recv
 ```
-*Effect:* Writes to 5 different pages (exceeding the artificial 4-page limit).
-*Observation:* You should see logs like `Swapping memory at ... onto disk`. Data integrity is verified by reading the values back.
+*On Host:* Run `./pktRxTx -m 1` and type `send 32`.
+*Observation:* The shell should print the hex content of the 32 packets received.
 
-### 3. Memory Monitor
+### 3. Reliable Stream Test
 ```bash
-free
+exec recv_stream
 ```
-*Effect:* Displays a graphical bar of memory usage.
+*On Host:* Run `./pktRxTx -m 5`. This mode simulates a lossy/unordered network.
+*Observation:* The OS will log "Sending TCP RSD" when gaps are detected and successfully reconstruct the data stream.
 
-### 4. Zero-Copy IPC Performance
+### 4. File Transfer & Checksum
 ```bash
-exec ipc
+exec recv_file
 ```
-*Effect:* Runs a benchmark comparing Mailbox vs. Pipe.
-*Observation:* The Pipe test should complete significantly faster for large payloads (e.g., 16MB) because it avoids data copying.
+*On Host:* Run `./pktRxTx -m 5 -l 10 -s 50 -f <filename>`.
+*Observation:* The system will report the file size, show a progress bar, and finally print the Fletcher-16 checksum.
 
 ## 5. Key Design Decisions
 
-### 5.1. SMP Boot Synchronization
-Enabling VM on multi-core is tricky. We implemented a strict handshake:
-1.  **Core 0** sets up the kernel page table and wakes Core 1.
-2.  **Core 1** wakes up, **re-maps** the identity mapping (crucial fix), enables `satp`, and signals Core 0.
-3.  **Core 0** waits for the signal before removing the temporary low-memory mapping.
-This prevents Core 1 from crashing due to missing instruction mappings during boot.
+### 5.1 Supervisor User Memory Access (`SUM`)
+To allow the kernel to transmit data directly from user-space buffers via DMA, we explicitly set the `SR_SUM` bit in the `sstatus` register. This bypasses the Supervisor-mode protection that normally prevents accessing user-mapped pages, avoiding unnecessary `memcpy` operations.
 
-### 5.2. Allocator Safety
-We adjusted `INIT_KERNEL_STACK` to `0xffffffc052000000`. This forces the physical memory allocator to start issuing pages from `0x52001000` onwards. This protects the Kernel Image (`0x5020xxxx`) and the Master Page Directory (`0x51000000`) from being accidentally allocated to user processes, which previously caused the `0xDEADBEEF` corruption crash.
+### 5.2 PLIC Context Alignment
+A critical fix was made in `plic_init`. The register offsets for `hart_base` and `enable_base` were shifted to include `CONTEXT_PER_HART`. Without this, the kernel was attempting to claim interrupts from the wrong PLIC context, resulting in silent failures during task 3.
 
-### 5.3. Swap Management
-We use a `alloc_info_t` structure to track the state of every user page. This structure persists even when the page is on disk. When a process exits (`do_exit` or `do_kill`), we traverse the global swap lists to reclaim both the physical pages (if resident) and the tracking structures, ensuring no resource leaks.
+### 5.3 Reliable Layer Timeout
+The `sys_net_recv_stream` syscall includes a timeout mechanism. If no packets arrive within a specific window, it proactively sends an `RSD` (Resend) packet for the `current_seq`. This prevents the system from hanging if the final packet of a transmission is lost.

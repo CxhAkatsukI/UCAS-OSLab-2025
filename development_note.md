@@ -1,696 +1,497 @@
-# Project 4: Virtual Memory Management Implementation Note
+# Development Note
 
-## 1. Overview
-This project introduces the Virtual Memory (VM) subsystem to the UCAS-OS kernel. We transitioned from a physical address space model to the **Sv39** virtual addressing mode. This involves implementing multi-level page tables, kernel/user address space isolation, demand paging, page swapping (to SD card), and a zero-copy IPC mechanism (Page Pipe).
+### Task 1: NIC Initialization and Polled Transmission
 
----
+To meet the requirement of task 1 in the guidebook, we need to enable the kernel to communicate with the E1000 NIC hardware. Since the system is running in Sv39 virtual memory mode (from Project 4), we must first map the NIC's physical register space into the kernel's virtual address space. Then, we initialize the transmit (TX) descriptor ring and implement a polling-based transmission function.
 
-## 2. Task 1: Enabling Virtual Memory (Sv39)
-
-The first step was to enable the MMU and ensure the kernel could continue executing in a virtual address space.
-
-### 2.1. Kernel Entry & Identity Mapping
-The CPU boots in physical mode. To transition to virtual mode without crashing, we must establish a temporary "Identity Mapping" (Virtual Address = Physical Address) for the boot code, alongside the permanent Kernel High Mapping (`0xffffffc0...`).
-
-**Implementation in `arch/riscv/kernel/boot.c`:**
-We allocate a 2MB large page to map the kernel's physical location (`0x50200000`) to the virtual high address (`0xffffffc050200000`).
-
-**Critical SMP Fix:**
-As noted in the debugging logs, a race condition occurred where Core 0 disabled the temporary identity mapping before Core 1 enabled paging, causing Core 1 to crash on instruction fetch. We modified `boot_kernel` so Core 1 explicitly re-maps its execution path before enabling the MMU.
+#### 1.1 I/O Remapping (`ioremap`)
+The NIC registers are located at a physical address provided by the Device Tree. To access them, we implement `ioremap`. We use 2MB large pages to map the I/O range starting from `IO_ADDR_START` (`0xffffffe000000000`). This ensures efficient access to memory-mapped I/O (MMIO).
 
 ```c
-int ARRTIBUTE_BOOTKERNEL boot_kernel(unsigned long mhartid) {
-    if (mhartid == 0) {
-        setup_vm(); // Core 0 sets up global page tables
-    } else {
-        // [Fix] Core 1 ensures boot address is mapped before enabling VM
-        for (uint64_t pa = 0x50000000lu; pa < 0x51000000lu; pa += 0x200000lu) {
-            map_page(pa, pa, (PTE *)PGDIR_PA);
-        }
-        enable_vm();
+// kernel/mm/ioremap.c
+void *ioremap(unsigned long phys_addr, unsigned long size)
+{
+    uintptr_t va_start = io_base;
+
+    /* Map loop: Map 2MB pages until size is covered */
+    while (size > 0) {
+        kernel_map_page_helper(io_base, phys_addr, pa2kva(PGDIR_PA));
+
+        /* Use 2MB steps */
+        io_base   += LARGE_PAGE_SIZE;
+        phys_addr += LARGE_PAGE_SIZE;
+
+        if (size < LARGE_PAGE_SIZE)
+            size = 0;
+        else
+            size -= LARGE_PAGE_SIZE;
     }
-    // Jump to high virtual address
-    ((kernel_entry_t)pa2kva((uintptr_t)_start))(mhartid);
-    return 0;
+
+    local_flush_tlb_all();
+    return (void *)va_start;
 }
 ```
 
-### 2.2. User Process Creation (`cmd_vexec`)
-The `exec` syscall was overhauled to support virtual memory. Instead of loading raw binaries into physical memory, we now:
-1.  Allocate a root Page Directory (PGD) for the process.
-2.  **Share Kernel Space:** Copy the top half of the kernel PGD to the user PGD.
-3.  **Load Segments:** Parse the ELF headers. For `PT_LOAD` segments, we allocate physical pages and map them into the user's virtual address space (starting at `0x10000`).
+#### 1.2 Kernel Access to User Memory (`SUM` bit)
+During network transmission, the kernel needs to read data directly from user-space buffers. In RISC-V, Supervisor mode is normally restricted from accessing User pages. We enable the `SUM` (allow Supervisor User Memory access) bit in the `sstatus` register during boot.
 
-**Code Implementation:**
+```assembly
+/* arch/riscv/kernel/head.S */
+ENTRY(_start)
+  /* ... */
+  /* Enable SUM bit to allow kernel access user memory */
+  li t0, SR_SUM
+  csrs CSR_SSTATUS, t0
+  /* ... */
+```
+
+#### 1.3 Transmit Configuration (`e1000_configure_tx`)
+We set up a circular array of 64 descriptors. Each descriptor points to a dedicated DMA buffer. We use `kva2pa` to provide the hardware with physical addresses. 
+
 ```c
-// kernel/sched/sched.c
-pid_t do_exec(char *name, int argc, char *argv[], uint64_t mask) {
-    // ... PCB setup ...
+// drivers/e1000.c
+static void e1000_configure_tx(void)
+{
+    for (int i = 0; i < TXDESCS; i++) {
+        /* Link descriptor to pre-allocated physical DMA buffer */
+        tx_desc_array[i].addr = kva2pa((uintptr_t)tx_pkt_buffer[i]);
+        tx_desc_array[i].cmd = E1000_TXD_CMD_RS;     /* Report Status */
+        tx_desc_array[i].status = E1000_TXD_STAT_DD; /* Mark as initially Done */
+    }
 
-    // 1. Allocate Page Directory
-    uintptr_t pgdir = allocPage(1);
-    clear_pgdir(pgdir);
-    
-    // 2. Map Kernel Space (Share global kernel mappings)
-    share_pgtable(pgdir, pa2kva(PGDIR_PA)); 
-    new_pcb->pgdir = pgdir;
+    /* Program Base Address and Length registers */
+    uint64_t tx_base = kva2pa((uintptr_t)tx_desc_array);
+    e1000_write_reg(e1000, E1000_TDBAL, (uint32_t)(tx_base & 0xffffffff));
+    e1000_write_reg(e1000, E1000_TDBAH, (uint32_t)(tx_base >> 32));
+    e1000_write_reg(e1000, E1000_TDLEN, TXDESCS * sizeof(struct e1000_tx_desc));
 
-    // 3. Map User Code/Data (Copies from SD to new pages)
-    uint64_t entry_point = map_task(name, pgdir);
+    /* Initialize Head and Tail pointers to 0 */
+    e1000_write_reg(e1000, E1000_TDH, 0);
+    e1000_write_reg(e1000, E1000_TDT, 0);
 
-    // 4. Setup User Stack (Allocate page and copy argv to high memory)
-    new_pcb->user_sp = mm_setup_user_stack(new_pcb, argc, argv);
-    
-    // ...
+    /* Enable Transmit and set collision parameters */
+    e1000_write_reg(e1000, E1000_TCTL,
+        E1000_TCTL_EN | E1000_TCTL_PSP | (E1000_TCTL_CT & 0x100) | (E1000_TCTL_COLD & 0x40000));
+
+    local_flush_dcache();
 }
 ```
 
----
+#### 1.4 Polled Transmission (`e1000_transmit`)
+The transmission logic follows these steps:
+1.  Read the current `TDT` (Tail) from the NIC.
+2.  Check the `DD` (Descriptor Done) bit in the status field. If it's 0, the hardware is still busy, and the queue is full.
+3.  Copy user data to the DMA buffer and set the `EOP` (End of Packet) and `RS` (Report Status) bits.
+4.  Increment `TDT` to notify the hardware that a new packet is ready.
+5.  Use `local_flush_dcache()` to ensure the data is written from CPU cache to RAM where the DMA engine can see it.
 
-## 3. Task 2: Demand Paging
+```c
+// drivers/e1000.c
+int e1000_transmit(void *txpacket, int length)
+{
+    local_flush_dcache(); 
 
-To save memory and speed up startup, we implemented demand paging. Instead of allocating all pages at load time, we only map the virtual addresses. Physical pages are allocated via the Page Fault exception.
+    uint32_t tail = e1000_read_reg(e1000, E1000_TDT);
 
-**Implementation:**
-We registered `handle_page_fault` for Exceptions 12 (Instruction), 13 (Load), and 15 (Store).
+    /* Check if hardware is done with this descriptor */
+    if ((tx_desc_array[tail].status & E1000_TXD_STAT_DD) == 0) {
+        return 0; /* Queue full, return 0 for calling logic to wait */
+    }
+
+    tx_desc_array[tail].status = 0; /* Reset status */
+    uint16_t len = (length > TX_PKT_SIZE) ? TX_PKT_SIZE : length;
+    tx_desc_array[tail].length = len;
+
+    memcpy((uint8_t *)tx_pkt_buffer[tail], txpacket, len);
+    tx_desc_array[tail].cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS;
+
+    /* Advance tail */
+    e1000_write_reg(e1000, E1000_TDT, (tail + 1) % TXDESCS);
+
+    local_flush_dcache();
+    return len;
+}
+```
+
+This completes the basic polled transmission mechanism. In the `do_net_send` syscall, if `e1000_transmit` returns 0, the process will either busy-wait (Task 1) or block (Task 3).
+
+### Task 2: NIC Initialization and Polled Reception
+
+To meet the requirement of task 2 in the guidebook, we implement the reception logic for the E1000 NIC. Unlike transmission, which is active, reception is passive: the hardware identifies incoming packets, filters them by MAC address, and places them into memory. Our driver must prepare a ring of "empty" buffers for the NIC to fill and then poll them to retrieve data.
+
+#### 2.1 Receive Configuration (`e1000_configure_rx`)
+Initialization involves several critical steps to prepare the hardware for incoming traffic:
+1.  **MAC Filtering**: We program the `RAL0` and `RAH0` registers with the hardcoded MAC address. This tells the NIC to accept packets specifically addressed to our board. We also enable Broadcast Accept Mode (`BAM`) to receive ARP requests and other broadcast traffic.
+2.  **Descriptor Setup**: Similar to TX, we initialize a circular array of 64 descriptors. Each points to a `rx_pkt_buffer` in physical memory.
+3.  **Head/Tail Logic**: For reception, the hardware owns descriptors in the range `[Head, Tail]`. We initialize `RDH` to 0 and `RDT` to `RXDESCS - 1`, giving the NIC ownership of all available descriptors at startup.
+4.  **Control Register**: We enable the receiver (`EN`), set the buffer size to 2048 bytes, and enable Unicast Promiscuous Mode (`UPE`) for testing flexibility.
+
+```c
+// drivers/e1000.c
+static void e1000_configure_rx(void)
+{
+    /* Set MAC Address to RAL0/RAH0 */
+    uint32_t ral0 = (enetaddr[3] << 24) | (enetaddr[2] << 16) | (enetaddr[1] << 8) | enetaddr[0];
+    uint32_t rah0 = E1000_RAH_AV | (enetaddr[5] << 8) | enetaddr[4]; 
+    e1000_write_reg_array(e1000, E1000_RA, 0, ral0);
+    e1000_write_reg_array(e1000, E1000_RA, 1, rah0);
+
+    /* Initialize rx descriptors */
+    for (int i = 0; i < RXDESCS; i++) {
+        rx_desc_array[i].addr = kva2pa((uintptr_t)rx_pkt_buffer[i]);
+        rx_desc_array[i].status = 0; 
+    }
+
+    uint64_t rx_base = kva2pa((uintptr_t)rx_desc_array);
+    e1000_write_reg(e1000, E1000_RDBAL, (uint32_t)(rx_base & 0xffffffff));
+    e1000_write_reg(e1000, E1000_RDBAH, (uint32_t)(rx_base >> 32));
+    e1000_write_reg(e1000, E1000_RDLEN, RXDESCS * sizeof(struct e1000_rx_desc));
+
+    e1000_write_reg(e1000, E1000_RDH, 0);
+    e1000_write_reg(e1000, E1000_RDT, RXDESCS - 1); // Hardware owns all
+
+    /* Enable RX, BAM (Broadcast), and UPE (Promiscuous) */
+    e1000_write_reg(e1000, E1000_RCTL, E1000_RCTL_EN | E1000_RCTL_BAM | E1000_RCTL_UPE);
+
+    local_flush_dcache();
+}
+```
+
+#### 2.2 Polled Reception (`e1000_poll`)
+The `e1000_poll` function checks if a packet has arrived. The "next" packet to be processed by software is always at `(Tail + 1) % RXDESCS`. 
+1.  We check the `DD` bit. If it is 1, the NIC has filled the buffer and updated the descriptor.
+2.  We copy the data to the user-provided buffer.
+3.  **Returning the Descriptor**: Crucially, we clear the status and advance the `RDT` register to this index. This "moves the boundary" and gives the buffer back to the hardware for future packets.
+
+```c
+// drivers/e1000.c
+int e1000_poll(void *rxbuffer)
+{
+    local_flush_dcache();
+
+    /* Software processes the descriptor AFTER the current Tail */
+    uint32_t tail = (e1000_read_reg(e1000, E1000_RDT) + 1) % RXDESCS;
+
+    /* Check if the NIC has finished writing this packet */
+    if ((rx_desc_array[tail].status & E1000_RXD_STAT_DD) == 0) {
+        return 0; /* No packet yet */
+    }
+
+    uint16_t length = rx_desc_array[tail].length;
+    memcpy(rxbuffer, (uint8_t *)rx_pkt_buffer[tail], length);
+
+    rx_desc_array[tail].status = 0; /* Clear status for next use */
+    e1000_write_reg(e1000, E1000_RDT, tail); /* Give back to HW */
+
+    local_flush_dcache();
+    return length;
+}
+```
+
+#### 2.3 Network Receive Subsystem (`do_net_recv`)
+The high-level kernel function `do_net_recv` manages requests for multiple packets. For Task 2, if no packet is found, the system would typically busy-wait. However, to stay consistent with the Project 5 architecture, we implement the polling loop. (Note: The blocking logic for Task 3 is also present here, using `do_block`).
+
+```c
+// kernel/net/net.c
+int do_net_recv(void *rxbuffer, int pkt_num, int *pkt_lens)
+{
+    int total_bytes = 0;
+    for (int i = 0; i < pkt_num; i++) {
+        int len = e1000_poll(rxbuffer);
+
+        if (len > 0) {
+            pkt_lens[i] = len;
+            rxbuffer += len;
+            total_bytes += len;
+        } else {
+            /* Task 2 Logic: Busy wait or loop back */
+            /* Task 3 Logic: Block and wait for interrupt */
+            e1000_write_reg(e1000, E1000_IMS, E1000_IMS_RXDMT0 | E1000_IMS_RXT0); 
+            local_flush_dcache();
+            do_block(&CURRENT_RUNNING->list, &recv_block_queue);
+            i--; // Retry this packet index upon wake-up
+        }
+    }
+    return total_bytes;
+}
+```
+
+By completing this task, the OS is capable of basic two-way communication using the E1000 NIC via system calls.
+
+### Task 3: Interrupt-based Packet Transmission and Reception
+
+To meet the requirement of task 3 in the guidebook, we transition from CPU-intensive polling to an efficient interrupt-driven model. Instead of spinning while waiting for the NIC to finish sending or for new data to arrive, the current process will block and yield the CPU. The NIC will then trigger an external interrupt through the **PLIC** to wake the process once the hardware condition is met.
+
+#### 3.1 External Interrupt Routing (PLIC)
+The E1000 NIC is connected to the Platform-Level Interrupt Controller (PLIC). We must handle the multi-stage interrupt flow:
+1.  **PLIC Claim**: When an external interrupt occurs, the kernel reads the `claim` register to identify the source (ID 33 for QEMU, ID 3 for PYNQ).
+2.  **NIC Dispatch**: If the ID matches the NIC, we call `net_handle_irq`.
+3.  **PLIC Complete**: After processing, we write the ID back to the `complete` register to allow the PLIC to signal future interrupts.
 
 ```c
 // kernel/irq/irq.c
-void handle_page_fault(regs_context_t *regs, uint64_t stval, uint64_t scause) {
-    // stval contains the faulting virtual address.
-    // We allocate a page and map it for the current process.
-    alloc_limit_page_helper(stval, CURRENT_RUNNING->pgdir);
-    local_flush_tlb_page(stval);
-}
-```
-
----
-
-## 4. Task 3: Page Swapping (Swap to SD)
-
-To support applications larger than physical memory, we implemented a swap mechanism backed by the SD card.
-
-### 4.1. Data Structures
-We use a **FIFO (First-In, First-Out)** replacement policy. We maintain global lists to track pages:
-*   `in_mem_list`: Pages currently in RAM (candidates for eviction).
-*   `swap_out_list`: Pages currently stored on the SD card.
-
-### 4.2. Swap Out (Eviction) logic
-When `allocPage` fails to find free physical memory, `swapPage` is called:
-1.  Pick the victim page from the head of `in_mem_list`.
-2.  Write the page content to the swap sector on the SD card.
-3.  **Invalidate the PTE:** Set the Valid bit (V) to 0. This ensures the next access triggers a page fault.
-4.  Flush TLB.
-
-### 4.3. Swap In (Recovery) logic
-Inside `alloc_limit_page_helper`, if we detect a page fault for an address that exists in `swap_out_list`:
-1.  Allocate a new physical page (potentially triggering another swap-out).
-2.  Read the data back from the SD card.
-3.  Update the PTE with the new PPN and set V=1.
-
-```c
-// kernel/mm/mm.c
-ptr_t uva_allocPage(int numPage, uintptr_t uva) {
-    // Check if address is in swap_out_list
-    // ... search logic ...
-    if (found_in_swap) {
-        // Bring back from disk
-        alloc_info_t *victim = swapPage(); // Make room if full
-        info->pa = victim->pa;
-        
-        bios_sd_read(info->pa, 8, info->on_disk_sec);
-        
-        // Restore mapping
-        return pa2kva(info->pa);
-    }
-    // ... Else allocate fresh page ...
-}
-```
-
----
-
-## 5. Task 4: System Memory Monitor
-
-We implemented a `free` command to visualize memory usage. Due to the limited `printk` functionality, we used direct `bios_putstr` calls with ANSI escape codes to render a TUI-style progress bar.
-
-```c
-// kernel/mm/mm.c
-size_t do_get_free_mem(void) {
-    // Scan the page_bitmap to count free/used bits
-    for (int i = 0; i < TOTAL_PAGES / 8; i++) {
-        // ... bit counting ...
-    }
-    
-    // Draw Progress Bar
-    bios_putstr(ANSI_FG_CYAN "┌────── MEMORY MONITOR ──────┐\n\r");
-    // ... drawing logic ...
-    return free_bytes;
-}
-```
-
----
-
-## 6. Task 5: Zero-Copy IPC (Page Pipe)
-
-Standard IPC (Mailbox) involves copying data: Sender $\to$ Kernel Buffer $\to$ Receiver.
-**Page Pipe** transfers ownership of the *physical page* itself by manipulating page tables, achieving zero-copy transfer.
-
-### 6.1. `sys_pipe_give_pages` (Sender)
-1.  Identify the physical page corresponding to the user's buffer.
-2.  **Unmap** the page from the sender's page table (clear PTE, flush TLB).
-3.  Store the physical page info in the pipe's ring buffer.
-
-### 6.2. `sys_pipe_take_pages` (Receiver)
-1.  Retrieve the physical page info from the pipe.
-2.  **Map** the physical page into the receiver's page table at the requested virtual address.
-
-```c
-// kernel/ipc/pipe.c
-long do_pipe_give_pages(int pipe_idx, void *src, size_t length) {
-    // ... lock ...
-    // Unmap from current process (Sender)
-    void *page_info = user_unmap_page(current_va, CURRENT_RUNNING->pgdir);
-    
-    // Store in pipe buffer
-    p->page_buffer[p->tail] = page_info;
-    // ... signal receiver ...
-}
-
-long do_pipe_take_pages(int pipe_idx, void *dst, size_t length) {
-    // ... lock ...
-    // Get from pipe buffer
-    void *page_info = p->page_buffer[p->head];
-    
-    // Map to current process (Receiver)
-    user_map_page(current_va, CURRENT_RUNNING->pgdir, page_info);
-    // ...
-}
-```
-
----
-
-## 7. Key Debugging Fixes
-
-1.  **SMP Stack Collision:** Core 1's stack was initially mapped at `0x50600000`, which conflicted with the user program load address (`0x10000` inside 2MB identity map). We moved the Secondary Kernel Stack to high memory (`0xffffffc050600000`) to resolve the Store Page Fault.
-2.  **Ghost Page Tables:** `share_pgtable` originally copied the entire 4KB PGD. If the Master PGD contained dirty temporary mappings from previous tests, new processes inherited them. We restricted `share_pgtable` to only copy the upper 2KB (Kernel Space).
-3.  **Kernel Image Corruption:** The memory allocator (`allocPage`) was handing out physical address `0x51000000` (Kernel PGD location) to user processes because `kernMemCurr` initialization overlapped with kernel static data. We adjusted `INIT_KERNEL_STACK` to `0xffffffc052000000` to safeguard the kernel image.
-
----
-
-# Debugging Document
-
-# Task 1/2 Debugging Report: SMP Boot Crash & Page Faults
-
-## 1. Issue Overview
-When attempting to run the system in SMP mode (`make run-smp`) and execute the first user program (`vexec shell`), the system exhibited unstable behavior, including:
-1.  **Store Page Faults (Exception 15)** on Core 1.
-2.  **System Deadlocks** during kernel initialization.
-3.  **Boot Loops** where Core 1 repeatedly reset to the entry point `0x50202000`.
-
-## 2. Root Cause Analysis
-
-We identified three distinct but interconnected critical issues:
-
-### A. The PGD[0] Collision (Store Page Fault)
-*   **Symptom:** Core 1 crashed with Exception 15 when `shell` was loaded.
-*   **Cause:** The Secondary Kernel Stack (`S_INIT_KERNEL_STACK`) was defined at a low physical address (`0x50600000`). This address relies on the Identity Mapping in `PGD[0]`.
-*   **Conflict:** User programs (like `shell`) are loaded at `0x10000`, which *also* falls into `PGD[0]`. When the kernel mapped the user program using 4KB pages, it overwrote the Large Page (2MB) Identity Mapping entry used by the stack.
-*   **Result:** Core 1 lost access to its stack while running, causing a crash.
-
-### B. The Initialization Deadlock (Double Acquire)
-*   **Symptom:** Core 0 hung immediately after printing initialization messages. GDB showed it stuck in `exception_handler_entry` trying to acquire `kernel_lock`.
-*   **Cause:** We implemented `disable_tmp_map()` to remove the low memory mapping (as per the guidebook). However, the kernel subsequently tried to read `TASK_NUM_LOC` using its physical address (`0x502001fa`).
-*   **Mechanism:** Accessing the unmapped physical address triggered a **Load Page Fault** inside the initialization block (where the BKL was already held). The trap handler tried to re-acquire the BKL, resulting in a self-deadlock.
-
-### C. The SMP Boot Race Condition (Instruction Fetch Failure)
-*   **Symptom:** Core 1 failed to boot, with GDB showing `Cannot access memory` at `pc = 0x502020c8` immediately after executing `csrw satp`.
-*   **Cause:** Core 0 finished its initialization and called `disable_tmp_map()` **too fast**. It removed the identity mapping (`0x50...` -> `0x50...`) before Core 1 had finished enabling virtual memory.
-*   **Result:** When Core 1 turned on the MMU (`csrw satp`), it tried to fetch the next instruction at physical address `0x502020c8`. Since Core 0 had already deleted that mapping from the shared page table, the fetch failed, causing a crash.
-
----
-
-## 3. Implemented Solution
-
-We applied fixes in three specific areas to resolve these concurrency and memory management issues.
-
-### Step 1: Relocate Secondary Stack (`include/os/mm.h`)
-We moved the secondary core's stack to the **High Kernel Address Space**. This ensures Core 1 runs in `PGD[256+]`, completely avoiding conflicts with user space in `PGD[0]`.
-
-```c
-// OLD: #define S_INIT_KERNEL_STACK 0x50600000
-// NEW:
-#define S_INIT_KERNEL_STACK 0xffffffc050600000
-```
-
-### Step 2: Virtualize Boot Parameters (`init/main.c`)
-We ensured all accesses to bootloader variables use the `pa2kva` macro. This guarantees the data is accessed via the permanent High Kernel Mapping, so `disable_tmp_map()` does not cause page faults.
-
-```c
-// OLD: tasknum = *((short *)TASK_NUM_LOC);
-// NEW:
-tasknum = *((short *)pa2kva(TASK_NUM_LOC));
-```
-
-### Step 3: Strict SMP Synchronization (`init/main.c`)
-We restructured the initialization sequence in `main()` to enforce a strict "Happens-Before" relationship. Core 0 is strictly forbidden from removing the memory mapping until Core 1 signals it is safe.
-
-**Logic Flow:**
-1.  **Core 0:** Wakes up Core 1.
-2.  **Core 0:** Releases Lock (Critical to prevent Core 1 hanging).
-3.  **Core 0:** **Busy waits** for `core1_booted`.
-4.  **Core 1:** Boots, enables VM, switches to High Stack.
-5.  **Core 1:** Sets `core1_booted = 1`.
-6.  **Core 0:** Observes flag, re-acquires lock.
-7.  **Core 0:** Calls `disable_tmp_map()`.
-
-**Code Snippet:**
-```c
-    if (core_id == 0) {
-        // ...
-        wakeup_other_hart();
-        unlock_kernel(); // Allow Core 1 to run
-
-        // Strict barrier: Wait for Core 1 to be safe in High Mem
-        while (*(volatile int *)&core1_booted == 0) { 
-            asm volatile("nop"); 
-        }
-
-        lock_kernel(); // Re-enter kernel
-        
-        // NOW it is safe to delete the low mapping
-        disable_tmp_map(); 
-        
-        // ...
-    } else {
-        lock_kernel();
-        *(volatile int *)&core1_booted = 1; // Signal Core 0
-        asm volatile("fence rw,rw");
-        // ...
-        unlock_kernel();
-    }
-```
-
-## 4. Result
-*   **Core 1 Boot:** Successfully transitions from physical to virtual addressing without crashing.
-*   **User Space:** `vexec shell` successfully creates a new process. The user page table (`PGD[0]`) is cleanly separated from the kernel stack.
-*   **Stability:** The system passes the "Store Page Fault" check and runs multi-core tests reliably.
-
----
-
-# Task 1/2 Debugging Summary
-
-## 1. SMP Boot & Race Conditions
-
-### Issue: Core 1 Crash on VM Enable (why this is happening?)
-**Symptom:** Core 1 crashed immediately at the `sfence.vma` instruction inside `boot_kernel`. GDB reported `Cannot access memory`.
-**Analysis:**
-*   Core 1 requires an "Identity Mapping" (Virtual `0x50...` $\to$ Physical `0x50...`) to execute the instruction immediately following `sfence.vma`.
-*   Core 0 creates this mapping but subsequently removes it (`disable_tmp_map`).
-*   **Race Condition:** Core 1 was waking up and attempting to enable VM *before* Core 0 had finished writing the page tables, or *after* Core 0 had already disabled the temp map.
-**Solution:**
-*   Modified `arch/riscv/kernel/boot.c`: Core 1 now explicitly re-writes the identity mapping for the boot address range before enabling paging. This ensures the mapping exists regardless of Core 0's state.
-
-```C
-// In boot.c
-int ARRTIBUTE_BOOTKERNEL boot_kernel(unsigned long mhartid)
+void handle_irq_ext(regs_context_t *regs, uint64_t stval, uint64_t scause)
 {
-    if (mhartid == 0) {
-        setup_vm();
-    } else {
-        // map boot address
-        for (uint64_t pa = 0x50000000lu; pa < 0x51000000lu;
-            pa += 0x200000lu) {
-            map_page(pa, pa, (PTE *)PGDIR_PA);
-        }
-        enable_vm();
+    /* 1. Claim the interrupt from PLIC */
+    uint32_t irq = plic_claim();
+
+    /* 2. Check if the interrupt is from our NIC */
+    if (irq == PLIC_E1000_PYNQ_IRQ || irq == PLIC_E1000_QEMU_IRQ) {
+        net_handle_irq();
     }
 
-    /* enter kernel */
-    ((kernel_entry_t)pa2kva((uintptr_t)_start))(mhartid);
+    /* 3. Signal completion to PLIC */
+    if (irq) {
+        plic_complete(irq);
+    }
+}
+```
 
+#### 3.2 Transmit Blocking Logic (`do_net_send`)
+In the interrupt-driven version, if `e1000_transmit` returns 0 (queue full), we enable the **TXQE** (Transmit Queue Empty) interrupt mask and call `do_block`. The process enters the `send_block_queue` and stays there until the hardware signals that it has emptied its descriptors.
+
+```c
+// kernel/net/net.c
+int do_net_send(void *txpacket, int length)
+{
+    int trans_len = 0;
+    while (1) {
+        trans_len = e1000_transmit(txpacket, length);
+        if (trans_len > 0) break; 
+
+        /* Enable TXQE interrupt to wake us up when space opens */
+        e1000_write_reg(e1000, E1000_IMS, E1000_IMS_TXQE);
+        local_flush_dcache();
+
+        /* Block the current process until hardware is ready */
+        do_block(&CURRENT_RUNNING->list, &send_block_queue);
+    }
+    return trans_len;
+}
+```
+
+#### 3.3 Receive Blocking Logic (`do_net_recv`)
+Similarly, if `e1000_poll` finds no packets, we enable the **RXDMT0** (Receive Descriptor Minimum Threshold) or **RXT0** (Receive Timer) interrupts. This ensures that the process is woken up as soon as a packet arrives or the descriptor threshold is reached.
+
+```c
+// kernel/net/net.c
+int do_net_recv(void *rxbuffer, int pkt_num, int *pkt_lens)
+{
+    for (int i = 0; i < pkt_num; i++) {
+        int len = e1000_poll(rxbuffer);
+        if (len > 0) {
+            pkt_lens[i] = len;
+            rxbuffer += len;
+        } else {
+            /* No data: Enable RX interrupts and sleep */
+            e1000_write_reg(e1000, E1000_IMS, E1000_IMS_RXDMT0 | E1000_IMS_RXT0); 
+            local_flush_dcache();
+            do_block(&CURRENT_RUNNING->list, &recv_block_queue);
+            i--; // Retry the same index after waking
+        }
+    }
     return 0;
 }
 ```
 
-
-## 2. Memory Management & Page Tables
-
-### Issue: User Stack Garbage Pointer (Exception 15)
-**Symptom:** `vexec shell` crashed. `$sp` and `$stval` contained a garbage address (`0x1cccd93bfe0`) instead of the valid user stack (`0xf0000ffe0`).
-**Analysis:**
-*   Located in `kernel/sched/sched.c` inside `do_exec`.
-*   **C Pointer Arithmetic Error:** `ptr - integer` scales the integer by `sizeof(*ptr)`.
-*   `kva_argv_base - user_stack_kva` was calculated as `addr - (huge_addr * 8)`, causing integer overflow and the garbage value.
-**Solution:**
-*   Cast pointers to `uintptr_t` *before* subtraction to enforce byte-level arithmetic.
-
-```C
-// In sched.c, do_exec
-        uintptr_t offset_str = (uintptr_t)kva_str_base - user_stack_kva;
-        uintptr_t offset_argv = (uintptr_t)kva_argv_base - user_stack_kva;
-```
-
-### Issue: Syscall Memory Access (Exception 13)
-**Symptom:** `sys_write` crashed when the kernel tried to read the user's buffer.
-**Analysis:**
-*   RISC-V Supervisor mode cannot access User pages unless the `SUM` (Permit Supervisor User Access) bit is set in `sstatus`.
-**Solution:**
-*   Modified `SAVE_CONTEXT` in `arch/riscv/kernel/entry.S` to explicitly set `SR_SUM` when entering the kernel.
-
-```C
-    // Initialie `sstatus`, `SPP` field is now 0; `SPIE` field is now 1
-    pt_regs->sstatus = SR_SPIE | SR_SUM; // NOTE: Allow kernel to read syscall arguments
-```
-
-## 4. Loader & Linker Mismatch
-
-### Issue: Shell `help` Command Crash
-**Symptom:** Running `help` triggered a Load Page Fault (Exception 13).
-**Analysis:**
-*   **Linker (Makefile):** `USER_ENTRYPOINT` was `0x200000`. The code expected data at `0x20xxxx`.
-*   **Loader (`task.h`):** `USER_ENTRYPOINT` was `0x10000`. The kernel loaded code at `0x10xxxx`.
-*   The CPU tried to access unmapped memory at `0x20xxxx`.
-**Solution:**
-*   Updated `Makefile` to set `USER_ENTRYPOINT = 0x10000`, aligning it with the kernel loader.
-
-```cmake
-# Makefile
-BOOTLOADER_ENTRYPOINT   = 0x50200000
-KERNEL_ENTRYPOINT       = 0xffffffc050202000
-USER_ENTRYPOINT         = 0x10000
-```
-
-## 5. Process Lifecycle & Resource Recycling
-
-### Issue: Safe Memory Freeing
-**Problem:** A process cannot free its own kernel stack while running on it (suicide risk).
-**Solution:**
-*   **`do_exit`:** Marks process as `TASK_EXITED` (Zombie) but does *not* free memory.
-*   **`do_waitpid`:** The parent process detects the Zombie child and calls `free_all_pages` to safely recycle resources.
-*   **`do_kill`:** Safely frees memory only if the target is *not* the current running process.
-
-# Tasks 3 & 4 Implementation and Debugging Summary
-
-## 1. Overview
-This document summarizes the implementation of the Virtual Memory Swap Mechanism (Task 3) and the System Memory Monitor (Task 4). It details the data structures, core logic, and the critical debugging process that resolved kernel memory corruption issues.
-
----
-
-## 2. Task 3: Page Swap Mechanism
-
-**Goal:** Allow the system to run processes requiring more memory than physically available by swapping pages to an SD card.
-**Strategy:** FIFO (First-In, First-Out) Page Replacement with a strictly limited physical page count (set to 4 for testing).
-
-### 2.1. Data Structures (`include/os/mm.h`)
-We introduced a tracking structure to map User Virtual Addresses (UVA) to Physical Addresses (PA) and disk sectors.
+#### 3.4 NIC Interrupt Handler (`net_handle_irq`)
+The main NIC handler reads the `ICR` (Interrupt Cause Register) to see why the interrupt fired. **Note**: Reading `ICR` automatically clears the status bits. We then unblock all processes in the relevant queues.
 
 ```c
-// Limits
-#define USER_PAGE_MAX_NUM 128
-#define KERN_PAGE_MAX_NUM 4    // Artificial limit to force swapping
+// kernel/net/net.c
+void net_handle_irq(void)
+{
+    local_flush_dcache();
+    uint32_t icr = e1000_read_reg(e1000, E1000_ICR);
 
-typedef struct {
-    list_node_t lnode;    // FIFO Queue node
-    uintptr_t uva;        // User Virtual Address
-    uintptr_t pa;         // Assigned Physical Address
-    int on_disk_sec;      // Sector on SD card (if swapped out)
-    int pgdir_id;         // Process ID (to own the page)
-} alloc_info_t;
-
-extern alloc_info_t alloc_info[USER_PAGE_MAX_NUM];
-extern list_head in_mem_list;   // Resident pages
-extern list_head swap_out_list; // Swapped out pages
-extern list_head free_list;     // Unused trackers
-```
-
-### 2.2. Core Logic (`kernel/mm/mm.c`)
-
-**Swap Out (Eviction):**
-1.  Select the victim from the head of `in_mem_list` (FIFO).
-2.  Write physical page content to SD card.
-3.  **Invalidate PTE:** Walk the page table and set the entry to 0 to trigger a Page Fault on next access.
-4.  Flush TLB and clear the physical page.
-
-**Swap In (Allocation/Restoration):**
-1.  Check `swap_out_list`. If the requested UVA exists there, retrieve it.
-2.  If memory is full (`page_cnt >= 4`), call `swapPage()` to free a physical frame.
-3.  Read data from SD card (if restoring) or allocate fresh page.
-4.  Update Page Table with new Physical Address and permissions.
-
-```c
-// Simplified Logic for alloc_limit_page_helper
-uintptr_t alloc_limit_page_helper(uintptr_t va, uintptr_t pgdir) {
-    // ... PGD/PMD walking ...
-    
-    // If Leaf PTE is missing (0)
-    if (pte[vpn0] == 0) {
-        // uva_allocPage handles both "New Allocation" and "Swap In"
-        ptr_t pa = kva2pa(uva_allocPage(1, aligned_va));
-        set_pfn(&pte[vpn0], pa >> NORMAL_PAGE_SHIFT);
-        set_attribute(&pte[vpn0], _PAGE_PRESENT | _PAGE_USER | ...);
+    if (icr & E1000_ICR_TXQE) {
+        /* Hardware finished sending, wake up senders */
+        check_and_unblock(&send_block_queue);
+        /* Clear mask to avoid interrupt storm */
+        e1000_write_reg(e1000, E1000_IMC, E1000_IMC_TXQE);
     }
-    return pa2kva(get_pa(pte[vpn0]));
+    
+    if ((icr & E1000_ICR_RXDMT0) || (icr & E1000_ICR_RXT0)) {
+        /* New packets arrived, wake up receivers */
+        check_and_unblock(&recv_block_queue);
+        e1000_write_reg(e1000, E1000_IMC, E1000_IMC_RXDMT0 | E1000_IMC_RXT0);
+    }
+    local_flush_dcache();
 }
 ```
 
-### 2.3. Page Fault Handler (`kernel/irq/irq.c`)
-The handler intercepts exceptions 12, 13, and 15.
+By using this approach, the OS maximizes CPU utilization, allowing other user programs (like `fly`) to run smoothly even during heavy network I/O.
+
+### Task 4: Reliable Network Data Transfer
+
+To meet the requirement of task 4 in the guidebook, we implement a simplified transport layer protocol to ensure reliable, ordered data delivery over the potentially unreliable network. This involves handling packet loss, duplication, and out-of-order arrival using sequence numbers (`seq`), Acknowledgments (`ACK`), and Resend requests (`RSD`).
+
+#### 4.1 Reliable Protocol Header
+We define a custom 8-byte header starting at the 55th byte of the Ethernet frame. We use `__attribute__((packed))` to ensure hardware-level alignment and helper macros like `ntohl`/`htonl` to handle the conversion between Network Byte Order (Big Endian) and RISC-V Byte Order (Little Endian).
 
 ```c
-void handle_page_fault(regs_context_t *regs, uint64_t stval, uint64_t scause) {
-    // stval contains the faulting virtual address
-    // alloc_limit_page_helper triggers the swap logic automatically
-    alloc_limit_page_helper(stval, CURRENT_RUNNING->pgdir);
-    local_flush_tlb_all();
+// include/os/net.h
+struct reliable_hdr {
+    uint8_t magic;       /* 0x45 */
+    uint8_t flags;       /* DAT, ACK, RSD */
+    uint16_t len;        /* Payload length */
+    uint32_t seq;        /* Sequence Number (Byte offset) */
+} __attribute__((packed));
+```
+
+#### 4.2 Sending Control Packets (`send_control`)
+Since our kernel lacks a full TCP/IP stack, we manually construct control packets. We spoof the Ethernet and IPv4 headers to satisfy the `pktRxTx` tool on the host. This function allows the receiver to notify the sender of received data (`ACK`) or missing data (`RSD`).
+
+```c
+// kernel/net/net.c
+static void send_control(uint8_t flags, uint32_t seq)
+{
+    memset(control_packet, 0, sizeof(control_packet));
+    /* ... Manually fill Ethernet (14B) and IP (20B) and TCP (20B) ... */
+
+    /* Fill Reliable Header at Offset 54 */
+    struct reliable_hdr *rh = (struct reliable_hdr *)(control_packet + RELIABLE_HDR_OFFSET);
+    rh->magic = NET_MAGIC;
+    rh->flags = flags;
+    rh->seq   = htonl(seq);
+
+    /* Transmit via driver */
+    while (e1000_transmit(control_packet, 64) == 0) ;
 }
 ```
 
----
-
-## 3. Task 4: System Monitor
-
-**Goal:** Implement a `free` command to visualize memory usage.
-**Implementation:** We created a fancy TUI-style progress bar using `bios_putstr` and ANSI escape codes directly in the kernel to bypass `printk` limitations.
-
-### 3.1. Kernel Implementation (`kernel/mm/mm.c`)
+#### 4.3 Reorder Buffer and Stream Reception (`do_net_recv_stream`)
+The core logic of the reliable layer resides in `do_net_recv_stream`. It maintains a global `current_seq` to track the next expected byte.
+1.  **Check Reorder Buffer**: Before polling the NIC, we check if the expected packet was previously received out-of-order and stored in the `reorder_buf`.
+2.  **In-Order Arrival**: If the received `seq == current_seq`, we copy the data to the user buffer and advance `current_seq`.
+3.  **Out-of-Order Arrival**: If `seq > current_seq`, we store the packet in a free slot in the `reorder_buf` and send an `RSD` for the missing data.
+4.  **Timeouts**: If no valid packet arrives for a certain period, we trigger an `RSD` to prompt the sender.
 
 ```c
-size_t do_get_free_mem(void) {
-    size_t free_count = 0;
-    // ... Count bits in page_bitmap ...
-    
-    // ... Calculation logic ...
-
-    // Visual Rendering
-    bios_putstr("\n\r");
-    bios_putstr(ANSI_FG_CYAN "┌──────────────────────────────────────────────────────────────┐\n\r");
-    bios_putstr("│" ANSI_FG_WHITE "  UCAS-OS MEMORY MONITOR                                      " ANSI_FG_CYAN "│\n\r");
-    
-    // ... Progress bar logic (Green -> Yellow -> Red) ...
-    
-    return free_bytes;
-}
-```
-
----
-
-## 4. Debugging & Critical Fixes
-
-We encountered three major issues during development.
-
-### 4.1. Access Fault (Code 7)
-*   **Symptom:** `exec rw` crashed immediately with `Exception Code 7`.
-*   **Cause:** `init_swp_mgr()` was not called in `main.c`. The swap manager was using uninitialized pointers, mapping garbage physical addresses (likely `0x0`) into the page table.
-*   **Fix:** Added `init_swp_mgr()` call in `init/main.c`.
-
-### 4.2. Resource Leak (System Hang)
-*   **Symptom:** After killing a memory-heavy process (`mem_eater`), new processes would hang.
-*   **Cause:** While physical pages were freed, the `alloc_info` nodes remained in `in_mem_list`. The `page_cnt` was not decremented. New processes tried to swap out pages belonging to the dead process, accessing invalid page tables.
-*   **Fix:** Implemented `free_page_map_info(pgdir_id)` to recycle tracking nodes and decrement `page_cnt` in `do_kill` and `do_exit`.
-
-### 4.3. The `0xDEADBEEF` Kernel Corruption (Critical)
-*   **Symptom:** Running `mem_eater` followed by `fly` caused a crash. GDB showed `0xDEADBEEF` inside the Page Table of `fly`.
-*   **Analysis:**
-    1.  `mem_eater` requested memory.
-    2.  `allocPage` returned physical address `0x51000000`.
-    3.  `0x51000000` is the **Kernel Page Directory (`PGDIR_PA`)**.
-    4.  `mem_eater` wrote `0xDEADBEEF` to this address.
-    5.  When `fly` started, it copied the corrupted kernel mappings, leading to a crash.
-*   **Root Cause:** The memory allocator (`allocPage`) uses `kernMemCurr` to decide where to allocate the next page. This pointer was initialized too low, overlapping with the Kernel Image and Page Tables.
-
-### 4.4. The Final Fix
-To ensure the allocator **never** touches the kernel image (`0x50200000` range) or the Kernel Page Directory (`0x51000000`), we adjusted the `INIT_KERNEL_STACK` macro. Since the allocator initializes `kernMemCurr` based on `FREEMEM_KERNEL` (which is `INIT_KERNEL_STACK + PAGE_SIZE`), moving the stack pointer moves the allocation start point.
-
-**File:** `include/os/mm.h`
-
-```c
-// OLD VALUE: 0xffffffc050500000 (Too low! Overlaps with or precedes 0x51000000)
-
-// NEW VALUE: 
-// We set the stack base to 0x52000000.
-// This ensures FREEMEM_KERNEL starts at 0x52001000.
-// Physical memory 0x50000000 -> 0x52000000 is now effectively reserved/protected.
-#define INIT_KERNEL_STACK 0xffffffc052000000 
-```
-
-**Result:** `allocPage` now hands out pages starting from `0x52001000`. The Kernel Page Directory at `0x51000000` is safe from user processes. The swap test passes successfully.
-
-# Task 5 Implementation & Debugging Summary
-
----
-
-## 1. Concurrency & IPC Deadlocks
-
-### Issue: Mailbox "All-or-Nothing" Deadlock
-**Symptom:**
-The IPC test hung. GDB showed `do_mbox_recv` waiting for data and `do_mbox_send` waiting for space simultaneously.
-**Root Cause:**
-The original implementation enforced atomic message passing (e.g., if sending 4096 bytes, wait until 4096 bytes of space are available). If the buffer contained residual data (e.g., 1 byte), the receiver waited for 4096 bytes (had 1), and the sender waited for 4096 bytes (had 4095). Both blocked indefinitely.
-**Fix:**
-Changed logic to "Byte-Stream" / Chunk processing. Threads now sleep only if the buffer is completely full (sender) or completely empty (receiver).
-
-**Revised Code (`kernel/ipc/mailbox.c`):**
-```c
-int do_mbox_send(int mbox_idx, void *msg, int msg_length) {
-    // ... validation ...
-    // 1. Prefault user memory to prevent faults inside lock
-    if (make_buffer_resident(msg, msg_length) != 0) return -1;
-
-    do_mutex_lock_acquire(mbox->lock_idx);
-    for (int i = 0; i < msg_length; i++) {
-        // Wait only if buffer is strictly FULL
-        while (mbox->used_space >= MAX_MBOX_LENGTH) {
-            do_condition_broadcast(mbox->not_empty_cond_idx); // Wake consumer
-            do_condition_wait(mbox->not_full_cond_idx, mbox->lock_idx);
+// kernel/net/net.c
+int do_net_recv_stream(void *buffer, int *nbytes)
+{
+    /* ... Initialization ... */
+    while (received == 0) {
+        /* 1. Check Reorder Buffer for current_seq */
+        if (found_in_reorder_buffer) {
+            /* Copy data, update current_seq, send ACK, break */
         }
-        // ... write byte ...
+
+        /* 2. Poll NIC for new packets */
+        int len = e1000_poll(rx_raw);
+        if (len <= 0) {
+            /* Block and check for Timeout to send RSD */
+            do_block(...);
+            continue;
+        }
+
+        /* 3. Parse Header */
+        struct reliable_hdr *rh = (struct reliable_hdr *)(rx_raw + RELIABLE_HDR_OFFSET);
+        uint32_t seq = ntohl(rh->seq);
+
+        if (seq == current_seq) {
+            /* In-order: Copy and ACK */
+            current_seq += dlen;
+            send_control(NET_OP_ACK, current_seq);
+        } else if (seq > current_seq) {
+            /* Out-of-order: Store in buffer and RSD */
+            store_in_reorder_buf(rx_raw);
+            send_control(NET_OP_RSD, current_seq);
+        }
     }
-    do_condition_broadcast(mbox->not_empty_cond_idx); // Final wake
-    do_mutex_lock_release(mbox->lock_idx);
-    return msg_length;
-}
-```
-
----
-
-## 2. Scheduler & Interrupt Handling
-
-### Issue: Re-entrant Interrupt Deadlock (BKL)
-**Symptom:**
-System froze. GDB showed `[CORE 1] Process 'Windows' Attempting to acquire BKL` immediately after an IRQ.
-**Root Cause:**
-The "Windows" process frequently holds the Big Kernel Lock (BKL) via syscalls (`sys_move_cursor`). A Timer Interrupt occurred *while* the BKL was held. The interrupt handler blindly called `do_scheduler()`, which attempted to re-acquire the BKL, causing a self-deadlock.
-**Fix:**
-Modify the timer interrupt handler to check `SSTATUS_SPP`. If the interrupt came from Kernel Mode, return immediately without scheduling.
-
-```C
-// In irq.c
-void handle_irq_timer(regs_context_t *regs, uint64_t stval, uint64_t scause)
-{
-    // TODO: [p2-task4] clock interrupt handler.
-    // Note: use bios_set_timer to reset the timer and remember to reschedule
-    if (!CONFIG_TIMESLICE_FINETUNING) {
-        bios_set_timer(get_ticks() + TIMER_INTERVAL);
-    }
-
-    // FIX: Did we come from Kernel Mode?
-    // We check the saved 'sstatus' register in the context.
-    if ((regs->sstatus & (1L << 8)) != 0) {
-        // CASE A: Interrupt happened inside Kernel (while holding BKL).
-        // We MUST NOT try to schedule, or we will deadlock on the BKL.
-        // We simply return. The interrupted kernel code (syscall) will continue,
-        // finish its work, and release the BKL.
-        ;
-    } else {
-        do_scheduler();
-    }
-}
-```
-
-### Issue: Process Starvation
-
-**Symptom:**
-After applying the re-entrancy fix, the shell would not start. The scheduler constantly picked "Windows" or "MS-DOS".
-
-**Fix:**
-Since this only happens when the first user program is started through `cmd_vexec`, we can Directly call `do_scheduler` in `cmd_vexec`, to pick `shell` from `ready_queue`.
-
-**Revised Code (`init/cmd.c`):**
-```c
-int cmd_vexec(char *args)
-{
-	...
-    enable_preempt();
-    do_scheduler();
-    asm volatile("wfi");
-
     return 0;
 }
-
 ```
 
----
+#### 4.4 Reliable Transfer Verification
+In user space, we implemented `recv_file.c` to test this system. It receives a file, parses the file size from the first 4 bytes of the stream, and calculates a **Fletcher-16 checksum** to verify data integrity.
 
-## 3. Memory Management
-
-### Issue: "Ghost" Page Tables (Dirty Page Reallocation)
-**Symptom:**
-`make_buffer_resident` found a valid physical address for a User Virtual Address (`0x40000000`) that had not been allocated yet. GDB showed the Master Kernel PGD (`PGDIR_PA`) contained a valid mapping at Index 1 (`0x40000000-0x7FFFFFFF`).
-**Root Cause:**
-`share_pgtable` was copying **all 512 entries** from the Master PGD to new processes. A previous test (Pipe) had dirtied the Master PGD (likely via an incorrect pointer usage during early boot/init). New processes inherited this "Ghost" mapping.
-**Fix:**
-Restrict `share_pgtable` to only copy the upper half (Kernel Space) of the Page Directory.
-
-**Revised Code (`kernel/mm/mm.c`):**
 ```c
-void share_pgtable(uintptr_t dest_pgdir, uintptr_t src_pgdir) {
-    // Only copy Kernel Space (Indices 256-511).
-    // 256 entries * 8 bytes = 2048 bytes offset.
-    memcpy((uint8_t *)dest_pgdir + 2048, (uint8_t *)src_pgdir + 2048, 2048);
-}
-```
-
-### Issue: Memory Leak on Exit
-**Symptom:**
-After the IPC test finished, `free` reported memory as still being used (e.g., 48 MB used, only 16 MB freed).
-**Root Cause:**
-`do_exit` was not cleaning up resources.
-**Fix:**
-Added resource cleanup calls to `do_exit`.
-
-**Revised Code (`kernel/sched/sched.c`):**
-```c
-void do_exit(void)
-{
-    pcb_t *current_running = CURRENT_RUNNING;
-
-    current_running->status = TASK_EXITED;
-
-    /* Free resources */
-    int pcb_index = current_running - pcb;
-    free_page_map_info(pcb_index);
-    free_all_pages(current_running);
-
-    /* Safe switch to kernel page table before release */
-    set_satp(SATP_MODE_SV39, 0, PGDIR_PA >> NORMAL_PAGE_SHIFT);
-    local_flush_tlb_all();
-
-    /* Wake up waiting parent */
-    if (!list_is_empty(&current_running->wait_list)) {
-        pcb_t *parent = list_entry(current_running->wait_list.next, pcb_t, list);
-        do_unblock(&parent->list);
+// test/test_project5/recv_file.c
+int main() {
+    /* ... */
+    while (total_received_data < file_size) {
+        sys_net_recv_stream(buffer, &nbytes);
+        /* Calculate Fletcher-16 on incoming stream */
+        checksum = fletcher16_step(checksum, buffer, nbytes);
+        total_received_data += nbytes;
     }
-
-    do_scheduler();
+    printf("Final Checksum: 0x%04x\n", checksum);
 }
 ```
 
+This completes all tasks for Project 5. The system now supports a robust networking stack capable of handling real-world network conditions.
+
 ---
 
-## 4. Remaining Bugs
+### Debug Note
 
-1. Project 3, `condition` test cannot run.
-2. Project 3, `deadlock_sol` fails.
+#### Bug 1
 
+**Phenomenon:** `e1000` does not trigger any interrupt.
 
+**Solution:** Modify `plic_init` function to allow `e1000` trigger interrupts in S mode:
 
+```C
+// In drivers/plic.c
+handler->hart_base   = plic_regs + CONTEXT_BASE + CONTEXT_PER_HART;
+handler->enable_base = plic_regs + ENABLE_BASE + ENABLE_PER_HART;
+```
+
+#### Bug 2
+
+**Phenomenon & AI Prompt:**
+
+I'm currently working on Operating System Lab Project 5 task 4. I want you to read my code carefully and help me debug:
+
+1. The issue is as follows: I executed `exec recv_stream` in the shell, since there's no packets received yet, the program's status will turn to `BLOCKED`. Then, I executed `sudo ./pktRxTx -m 5` from external, the expected behavior is, when enough numbers of packet arrives, `e1000` will trigger an interrupt. However, in my case, the interrupt never fires, and the user program stay blocked.
+2. In the previous experiment, I confirmed that e1000 CAN trigger an interrupt when I execute the user program `recv`, and execute `./pktRxTx -m 1` from external, and type in `send 60`. This time the `recv` program will be woken up and start receiving packets. I am confused why this case will fire the interrupt and the problematic case won't.
+3. I hope you to read my code carefully and tell me: a. when will the e1000 netcard fire an interrupt? How to fix my problem for task 4?? Pleas DO NOT modify my code directly, ONLY tell me how to fix it and give me example code. I will apply the fix MYSELF.
+4. Here is the content of the guidebook, you can use as a reference: ...
+
+**Solution:** The problem occurs because the `send_control` function is not working. Its sent control packets are filtered out by `pktRxTx`. In order to avoid this, our control packets shall have valid `IPv4` and `TCP` headers, as shown in the floowing code:
+
+```C
+// In kernel/net/net.c
+    /* --- 2. IPv4 Header (20 bytes) --- */
+    /* Offset 14 */
+    uint8_t *ip = (uint8_t *)(control_packet + 14);
+    ip[0] = 0x45; /* Ver=4, IHL=5 */
+    ip[1] = 0x00; /* TOS */
+    /* Total Len = 62 (EtherHeader(14) not included in IP Len) */
+    /* IP(20) + TCP(20) + Reliable(8) = 48 bytes */
+    ip[2] = 0x00; ip[3] = 0x30; /* 48 bytes */
+    ip[4] = 0x00; ip[5] = 0x00; /* ID */
+    ip[6] = 0x40; ip[7] = 0x00; /* Flags=DF, Frag=0 */
+    ip[8] = 0x40; /* TTL=64 */
+    ip[9] = 0x06; /* Proto=TCP (6) - CRITICAL for pktRxTx */
+    /* Checksum (calc later) */
+    ip[10] = 0; ip[11] = 0; 
+    /* Src IP: 10.0.0.2 (Board) */
+    ip[12] = 10; ip[13] = 0; ip[14] = 0; ip[15] = 2;
+    /* Dst IP: 10.0.0.67 (Host - pktRxTx default) */
+    ip[16] = 10; ip[17] = 0; ip[18] = 0; ip[19] = 67;
+    
+    /* Calc IP Checksum */
+    uint16_t csum = calc_checksum(ip, 20);
+    ip[10] = csum & 0xff;
+    ip[11] = csum >> 8;
+
+    /* --- 3. TCP Header (20 bytes) --- */
+    /* Offset 14 + 20 = 34 */
+    uint8_t *tcp = (uint8_t *)(control_packet + 34);
+    /* Ports: 1234 -> 5678 */
+    tcp[0] = 0x04; tcp[1] = 0xd2;
+    tcp[2] = 0x16; tcp[3] = 0x2e;
+    /* Seq/Ack = 0 */
+    /* Offset=5 (20 bytes), Flags=ACK(0x10) */
+    tcp[12] = 0x50; tcp[13] = 0x10;
+    /* Window, Checksum, UrgPtr = 0 */
+```
+
+#### Bug 3
+
+**Phenomenon**: QEMU passed, on-board stuck.
+
+**Solution:** `RECV_TIMEOUT` value too large. make it smaller (I decreased it from `100000000` to `1000000`), although QEMU will encounter an error under this value (the error is subtle, only occurs when user program `recv_stream` transfers more than 100 packets), the on-board test is successful (As far as I can concern, it can stably transfer more than 500+ packets).
