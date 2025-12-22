@@ -54,7 +54,7 @@ void handle_irq_timer(regs_context_t *regs, uint64_t stval, uint64_t scause)
     }
 
     /* Wake up network tasks to check for reliable transport timeouts */
-    net_timer_check();
+    // net_timer_check();
 
     // FIX: Did we come from Kernel Mode?
     // We check the saved 'sstatus' register in the context.
