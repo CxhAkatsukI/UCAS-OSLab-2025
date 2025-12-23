@@ -333,4 +333,9 @@ int sys_net_recv_stream(void *buffer, int *nbytes)
 {
     return invoke_syscall(SYSCALL_NET_RECV_STREAM, (long)buffer, (long)nbytes, 0, 0, 0);
 }
+
+void sys_net_reset(void)
+{
+    invoke_syscall(SYSCALL_NET_RESET, 0, 0, 0, 0, 0);
+}
 /************************************************************/

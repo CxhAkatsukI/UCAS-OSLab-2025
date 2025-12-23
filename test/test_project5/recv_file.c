@@ -26,6 +26,9 @@ int main(int argc, char *argv[])
     char buffer[CHUNK_SIZE];
     int nbytes;
     
+    // Reset the reliable layer to ensure we start fresh
+    sys_net_reset();
+
     // File transfer state
     uint32_t file_size = 0;
     uint32_t total_received_data = 0;

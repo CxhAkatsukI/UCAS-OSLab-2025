@@ -32,6 +32,9 @@ int main(int argc, char *argv[])
 
     int print_location = 1; // Line number to print output
 
+    // Reset the reliable layer to ensure we start fresh
+    sys_net_reset();
+
     // Clear screen area
     sys_move_cursor(0, print_location);
     printf("[RECV STREAM] Starting Reliable Data Reception...\n");
