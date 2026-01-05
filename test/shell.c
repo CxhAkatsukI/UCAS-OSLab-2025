@@ -151,6 +151,11 @@ void cmd_exec(char *args) {
     if (args == NULL) {
         printf("Usage: exec <task_name> [args...]\n");
         return;
+        /************************************************************/
+        // TODO [P6-task1]: mkfs, statfs, cd, mkdir, rmdir, ls
+
+        // TODO [P6-task2]: touch, cat, ln, ls -l, rm
+        /************************************************************/
     }
 
     char *argv[MAX_ARGS];
