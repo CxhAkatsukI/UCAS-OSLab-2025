@@ -45,6 +45,16 @@ void cmd_exec(char *args);
 void cmd_kill(char *args);
 void cmd_taskset(char *args);
 void cmd_free(char *args);
+void cmd_mkfs(char *args);
+void cmd_statfs(char *args);
+void cmd_cd(char *args);
+void cmd_mkdir(char *args);
+void cmd_rmdir(char *args);
+void cmd_ls(char *args);
+void cmd_touch(char *args);
+void cmd_cat(char *args);
+void cmd_ln(char *args);
+void cmd_rm(char *args);
 
 // The command table for our shell
 command_t cmd_table[] = {
@@ -54,7 +64,17 @@ command_t cmd_table[] = {
     {"exec", "Execute a task by name. Usage: exec <task_name>", cmd_exec},
     {"kill", "Kill a process by its PID. Usage: kill <pid>", cmd_kill},
     {"taskset", "Set or retrieve the CPU affinity of a process.", cmd_taskset},
-    {"free", "Show remaining memory. Usage: free [-h]", cmd_free}
+    {"free", "Show remaining memory. Usage: free [-h]", cmd_free},
+    {"mkfs", "Format file system.", cmd_mkfs},
+    {"statfs", "Show file system statistics.", cmd_statfs},
+    {"cd", "Change directory.", cmd_cd},
+    {"mkdir", "Create directory.", cmd_mkdir},
+    {"rmdir", "Remove directory.", cmd_rmdir},
+    {"ls", "List directory contents.", cmd_ls},
+    {"touch", "Create a file.", cmd_touch},
+    {"cat", "Print file content.", cmd_cat},
+    {"ln", "Create hard link.", cmd_ln},
+    {"rm", "Remove file.", cmd_rm}
 };
 
 #define NR_CMD (sizeof(cmd_table) / sizeof(command_t))
@@ -375,6 +395,101 @@ void cmd_free(char *args) {
     printf("\n");
 }
 
+void cmd_mkfs(char *args) {
+    sys_mkfs();
+}
+
+void cmd_statfs(char *args) {
+    sys_statfs();
+}
+
+void cmd_cd(char *args) {
+    if (args == NULL) {
+        printf("Usage: cd <path>\n");
+        return;
+    }
+    sys_cd(args);
+}
+
+void cmd_mkdir(char *args) {
+    if (args == NULL) {
+        printf("Usage: mkdir <path>\n");
+        return;
+    }
+    sys_mkdir(args);
+}
+
+void cmd_rmdir(char *args) {
+    if (args == NULL) {
+        printf("Usage: rmdir <path>\n");
+        return;
+    }
+    sys_rmdir(args);
+}
+
+void cmd_ls(char *args) {
+    char *argv[MAX_ARGS];
+    int argc = tokenize_string(args, argv, MAX_ARGS);
+    int option = (strcmp(argv[argc - 1], "-h") == 0);
+    char *path = (strcmp(argv[0], "-h") == 0) ? NULL : argv[0];
+    sys_ls(path, option);
+}
+
+void cmd_touch(char *args) {
+    if (args == NULL) {
+        printf("Usage: touch <file>\n");
+        return;
+    }
+    int fd = sys_open(args, 3); // O_RDWR
+    if (fd >= 0) {
+        sys_close(fd);
+    } else {
+        printf("Error: Failed to create/open file %s\n", args);
+    }
+}
+
+void cmd_cat(char *args) {
+    if (args == NULL) {
+        printf("Usage: cat <file>\n");
+        return;
+    }
+    int fd = sys_open(args, 1); // O_RDONLY
+    if (fd < 0) {
+        printf("Error: Cannot open file %s\n", args);
+        return;
+    }
+    char buf[129];
+    int n;
+    while ((n = sys_read(fd, buf, 128)) > 0) {
+        buf[n] = '\0';
+        printf("%s", buf);
+    }
+    printf("\n");
+    sys_close(fd);
+}
+
+void cmd_ln(char *args) {
+    if (args == NULL) {
+        printf("Usage: ln <src> <dst>\n");
+        return;
+    }
+    char *argv[16];
+    int argc = tokenize_string(args, argv, 16);
+    if (argc != 2) {
+        printf("Usage: ln <src> <dst>\n");
+        return;
+    }
+    sys_ln(argv[0], argv[1]);
+}
+
+void cmd_rm(char *args) {
+    if (args == NULL) {
+        printf("Usage: rm <file>\n");
+        return;
+    }
+    sys_rm(args);
+}
+
 /**
  * @brief Main entry point for the shell program.
  */
@@ -389,3 +504,4 @@ int main(void) {
     // This part should not be reached
     return 0;
 }
+

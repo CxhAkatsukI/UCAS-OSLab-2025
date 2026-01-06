@@ -12,6 +12,7 @@
 #include <os/kernel.h>
 #include <os/task.h>
 #include <os/string.h>
+#include <os/fs.h>
 #include <os/mm.h>
 #include <os/time.h>
 #include <os/ioremap.h>
@@ -159,6 +160,7 @@ static void init_pcb(void)
     for (int i = 0; i < NUM_MAX_TASK; i++) {
         pcb[i].status = TASK_UNUSED;
         pcb[i].pid = -1;
+        pcb[i].cwd_ino = 1; /* Default to root directory */
 
         // Pre-allocate a kernel and user stack for each PCB
         pcb[i].kernel_stack_base = allocKernelPage(KERNEL_STACK_PAGES);
@@ -231,6 +233,22 @@ static void init_syscall(void)
     syscall[SYSCALL_NET_RECV] = (long (*)())&do_net_recv;
     syscall[SYSCALL_NET_RECV_STREAM] = (long (*)())&do_net_recv_stream;
     syscall[SYSCALL_NET_RESET] = (long (*)())&init_reliable_layer;
+    syscall[SYSCALL_FS_MKFS] = (long (*)())&do_mkfs;
+    syscall[SYSCALL_FS_STATFS] = (long (*)())&do_statfs;
+    syscall[SYSCALL_FS_CD] = (long (*)())&do_cd;
+    syscall[SYSCALL_FS_MKDIR] = (long (*)())&do_mkdir;
+    syscall[SYSCALL_FS_RMDIR] = (long (*)())&do_rmdir;
+    syscall[SYSCALL_FS_LS] = (long (*)())&do_ls;
+    // syscall[SYSCALL_FS_TOUCH] = (long (*)())&do_touch;
+    // syscall[SYSCALL_FS_CAT] = (long (*)())&do_cat;
+    syscall[SYSCALL_FS_OPEN] = (long (*)())&do_open;
+    syscall[SYSCALL_FS_READ] = (long (*)())&do_read;
+    syscall[SYSCALL_FS_WRITE] = (long (*)())&do_write;
+    syscall[SYSCALL_FS_CLOSE] = (long (*)())&do_close;
+    syscall[SYSCALL_FS_LN] = (long (*)())&do_ln;
+    syscall[SYSCALL_FS_RM] = (long (*)())&do_rm;
+    syscall[SYSCALL_FS_LSEEK] = (long (*)())&do_lseek;
+    syscall[SYSCALL_FS_SYNC] = (long (*)())&do_fs_sync;
 }
 /************************************************************/
 
@@ -304,6 +322,15 @@ int main(void)
         // Init system call table (0_0)
         init_syscall();
         printk("> [INIT] System call initialized successfully.\n");
+
+        // Init File System
+        init_fs();
+        printk("> [INIT] File System initialized.\n");
+
+        // Launch Write-Back Daemon
+        char *fs_daemon_argv[] = {"fs_daemon", NULL};
+        pid_t wb_pid = do_exec("fs_daemon", 1, fs_daemon_argv, 0);
+        printk("> [INIT] FS Write-Back Daemon launched (PID %d).\n", wb_pid);
 
         // Init PLIC
         // plic_init(plic_addr, nr_irqs);

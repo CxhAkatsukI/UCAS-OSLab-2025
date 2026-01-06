@@ -1,3 +1,4 @@
+#include "os/fs.h"
 #include <asm/unistd.h>
 #include <assert.h>
 #include <csr.h>

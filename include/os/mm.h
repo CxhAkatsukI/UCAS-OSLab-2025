@@ -34,8 +34,8 @@
 #define MAP_USER 2
 #define MEM_SIZE 32
 #define PAGE_SIZE 4096 // 4K
-#define INIT_KERNEL_STACK 0xffffffc052000000 // WARNING: Should NOT be less than 0xffffffc051000000, or PGDIR will be overwritten
-#define S_INIT_KERNEL_STACK 0xffffffc050600000
+#define INIT_KERNEL_STACK 0xffffffc052100000 // WARNING: Should NOT be less than 0xffffffc051000000, or PGDIR will be overwritten
+#define S_INIT_KERNEL_STACK 0xffffffc052200000
 #define INIT_USER_STACK 0x52500000
 #define FREEMEM_KERNEL (INIT_KERNEL_STACK+PAGE_SIZE)
 #define FREEMEM_USER INIT_USER_STACK

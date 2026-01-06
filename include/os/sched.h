@@ -132,6 +132,9 @@ typedef struct pcb
     /* lap count for a certain task, e.g. fly */
     int lap_count;
 
+    /* Current Working Directory Inode Number */
+    uint32_t cwd_ino;
+
 } pcb_t;
 
 /* ready queue to run */

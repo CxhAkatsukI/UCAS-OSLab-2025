@@ -1,3 +1,4 @@
+#include "os/fs.h"
 #include "os/net.h"
 #include <type.h>
 #include <assert.h>
@@ -329,20 +330,23 @@ void do_scheduler(void)
     /* 1. Wake up expired tasks from sleep queue */
     check_sleeping();
 
+    /* 2. Check Filesystem writeback */
+    // check_write_back();
+
     /************************************************************/
     // TODO: [p5-task3] Check send/recv queue to unblock PCBs
     /************************************************************/
 
-    /* 2. Re-enqueue current task if it was preempted (not blocked/exited) */
+    /* 3. Re-enqueue current task if it was preempted (not blocked/exited) */
     sched_enqueue_prev(prev);
 
-    /* 3. Pick next task (Policy) */
+    /* 4. Pick next task (Policy) */
     next = pick_next_task(core_mask, core_id);
 
-    /* 4. Prepare hardware/metadata for switch */
+    /* 5. Prepare hardware/metadata for switch */
     perform_switch_hooks(prev, next, core_id);
 
-    /* 5. Perform Context Switch (Assembly) */
+    /* 6. Perform Context Switch (Assembly) */
     switch_to(prev, next);
 }
 
@@ -410,8 +414,11 @@ static int mm_init_pcb_vm(pcb_t *pcb)
 static uintptr_t mm_setup_user_stack(pcb_t *pcb, int argc, char *argv[])
 {
     /* 1. Allocate physical page for User Stack top */
-    uintptr_t user_stack_base_va = USER_STACK_ADDR - PAGE_SIZE;
+    uintptr_t user_stack_base_va = USER_STACK_ADDR - USER_STACK_PAGES * PAGE_SIZE;
     uintptr_t user_stack_page_kva = alloc_page_helper(user_stack_base_va, pcb->pgdir);
+    for (int i = 1; i < USER_STACK_PAGES; i++) {
+        alloc_page_helper(user_stack_base_va + i * PAGE_SIZE, pcb->pgdir);
+    }
     
     /* 2. Calculate size for strings */
     int total_str_len = 0;

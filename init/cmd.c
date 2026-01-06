@@ -32,7 +32,7 @@ char KERNEL_BATCH_HANDLER_ADDR[MAX_NAME_LEN];
 /* Command table for all the available commands */
 command_t cmd_table[] = {
     {"help",        "Display information about all supported commands", cmd_help},
-    {"ls",          "List all loaded applications", cmd_ls},
+    {"tasks",          "List all loaded applications", cmd_tasks},
     {"exec",        "Execute a task by name or ID", cmd_exec},
     {"vexec",       "Execute a task by name or ID with virtual memory on", cmd_vexec},
     {"write_batch", "Write a batch processing sequence to image", cmd_write_batch},
@@ -146,10 +146,10 @@ void run_command_loop() {
 }
 
 /**
- * cmd_ls - List all available tasks.
+ * cmd_tasks - List all available tasks.
  * @args: Unused argument string.
  */
-int cmd_ls(char *args) {
+int cmd_tasks(char *args) {
     /* The 'args' parameter is ignored for this command. */
     bios_putstr("Info: Listing tasks:\n\r");
 
