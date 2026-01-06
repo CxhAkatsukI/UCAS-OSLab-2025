@@ -306,12 +306,12 @@ int main(void)
         printk("> [INIT] System call initialized successfully.\n");
 
         // Init PLIC
-        plic_init(plic_addr, nr_irqs);
-        printk("> [INIT] PLIC initialized successfully.\n");
+        // plic_init(plic_addr, nr_irqs);
+        // printk("> [INIT] PLIC initialized successfully.\n");
 
         // Init network device
-        e1000_init();
-        printk("> [INIT] E1000 device initialized successfully.\n");
+        // e1000_init();
+        // printk("> [INIT] E1000 device initialized successfully.\n");
 
         // Init screen (QAQ)
         init_screen();

@@ -388,7 +388,7 @@ int sys_read(int fd, char *buff, int length)
     return 0;  // return the length of trully read data
 }
 
-int sys_write(int fd, char *buff, int length)
+int sys_f_write(int fd, char *buff, int length)
 {
     // TODO [P6-task2]: Implement sys_write
     return 0;  // return the length of trully written data

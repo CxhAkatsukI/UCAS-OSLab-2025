@@ -79,7 +79,7 @@ int sys_rmdir(char *path);
 int sys_ls(char *path, int option);
 int sys_open(char *path, int mode);
 int sys_read(int fd, char *buff, int length);
-int sys_write(int fd, char *buff, int length);
+int sys_f_write(int fd, char *buff, int length);
 int sys_close(int fd);
 int sys_ln(char *src_path, char *dst_path);
 int sys_rm(char *path);

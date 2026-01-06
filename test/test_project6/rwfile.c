@@ -11,7 +11,7 @@ int main(void)
     // write 'hello world!' * 10
     for (int i = 0; i < 10; i++)
     {
-        sys_write(fd, "hello world!\n", 13);
+        sys_f_write(fd, "hello world!\n", 13);
     }
 
     // read
