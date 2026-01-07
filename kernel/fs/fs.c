@@ -31,8 +31,21 @@ typedef struct page_cache_entry {
 } page_cache_entry_t;
 
 static page_cache_entry_t page_cache[CACHE_SIZE];
+
+/* Dentry Cache */
+#define DCACHE_SIZE 128
+typedef struct dcache_entry {
+    uint32_t parent_ino;
+    uint32_t ino;
+    char name[MAX_FILE_NAME];
+    uint8_t valid;
+} dcache_entry_t;
+
+static dcache_entry_t dcache[DCACHE_SIZE];
+
 static uint32_t current_access_time = 0;
 static spin_lock_t cache_lock = {UNLOCKED};
+int dcache_enable = 1;
 
 static void flush_block_unlocked(int index)
 {
@@ -153,11 +166,12 @@ void do_fs_sync(void)
     // 1. Update Config
     int fd = do_open("/proc/sys/vm", O_RDONLY);
     if (fd >= 0) {
-        char buf[128];
-        int len = do_read(fd, buf, 127);
+        char buf[256]; // Increased buffer size to ensure we catch all commands
+        int len = do_read(fd, buf, 255);
         if (len > 0) {
             buf[len] = '\0';
             
+            // --- Parse page_cache_policy ---
             char *p_policy = k_strstr(buf, "page_cache_policy = ");
             if (p_policy) {
                 int new_policy = 0;
@@ -166,6 +180,7 @@ void do_fs_sync(void)
                     new_policy = new_policy * 10 + (*p - '0');
                     p++;
                 }
+                // If switching from Write-Back to Write-Through, flush immediately
                 if (page_cache_policy == CACHE_POLICY_WRITE_BACK && new_policy == CACHE_POLICY_WRITE_THROUGH) {
                     spin_lock_acquire(&cache_lock);
                     for (int i = 0; i < CACHE_SIZE; i++) flush_block_unlocked(i);
@@ -174,6 +189,7 @@ void do_fs_sync(void)
                 page_cache_policy = new_policy;
             }
 
+            // --- Parse write_back_freq ---
             char *p_freq = k_strstr(buf, "write_back_freq = ");
             if (p_freq) {
                 int new_freq = 0;
@@ -184,11 +200,41 @@ void do_fs_sync(void)
                 }
                 if (new_freq > 0) write_back_freq = new_freq;
             }
+
+            // --- Parse dcache_enable ---
+            char *p_dcache = k_strstr(buf, "dcache_enable = ");
+            if (p_dcache) {
+                int val = 0;
+                char *p = p_dcache + 16;
+                while (*p >= '0' && *p <= '9') {
+                    val = val * 10 + (*p - '0');
+                    p++;
+                }
+                dcache_enable = val;
+            }
+
+            // --- Parse clear_cache ---
+            // This is crucial for the "Cold Read" test
+            if (k_strstr(buf, "clear_cache = 1")) {
+                spin_lock_acquire(&cache_lock);
+                for (int i = 0; i < CACHE_SIZE; i++) {
+                    // Flush dirty blocks before clearing to avoid data loss
+                    flush_block_unlocked(i);
+                    // Invalidate the entry
+                    page_cache[i].valid = 0;
+                }
+                spin_lock_release(&cache_lock);
+
+                // Also clear Dcache
+                for (int i = 0; i < DCACHE_SIZE; i++) {
+                    dcache[i].valid = 0;
+                }
+            }
         }
         do_close(fd);
     }
 
-    // 2. Flush
+    // 2. Periodic Flush (for Write-Back policy)
     if (page_cache_policy == CACHE_POLICY_WRITE_BACK) {
         spin_lock_acquire(&cache_lock);
         for (int i = 0; i < CACHE_SIZE; i++) {
@@ -209,11 +255,11 @@ static void clear_blocks(uint32_t start_block, uint32_t num_blocks)
 
 static int alloc_bit(uint32_t map_offset, uint32_t map_count, uint32_t total_count)
 {
-    char buf[BLOCK_SIZE];
+    uint8_t buf[BLOCK_SIZE]; // <--- USE uint8_t
     for (uint32_t i = 0; i < map_count; i++) {
         sd_read_block(map_offset + i, buf);
         for (uint32_t j = 0; j < BLOCK_SIZE; j++) {
-            if (buf[j] != (char)0xff) {
+            if (buf[j] != 0xff) { // Compare against 0xff
                 for (int k = 0; k < 8; k++) {
                     if (!((buf[j] >> k) & 1)) {
                         uint32_t index = i * BLOCK_SIZE * 8 + j * 8 + k;
@@ -231,7 +277,7 @@ static int alloc_bit(uint32_t map_offset, uint32_t map_count, uint32_t total_cou
 
 static void free_bit(uint32_t map_offset, uint32_t index)
 {
-    char buf[BLOCK_SIZE];
+    uint8_t buf[BLOCK_SIZE]; // <--- USE uint8_t
     uint32_t block_idx = index / (BLOCK_SIZE * 8);
     uint32_t byte_idx = (index % (BLOCK_SIZE * 8)) / 8;
     uint32_t bit_idx = index % 8;
@@ -387,8 +433,52 @@ static void free_inode_blocks(inode_t *inode)
     }
 }
 
+static uint32_t dcache_hash(uint32_t parent_ino, char *name)
+{
+    uint32_t hash = parent_ino;
+    while (*name) hash = (hash << 5) + *name++;
+    return hash % DCACHE_SIZE;
+}
+
+static void dcache_add(uint32_t parent_ino, char *name, uint32_t ino)
+{
+    uint32_t idx = dcache_hash(parent_ino, name);
+    dcache[idx].parent_ino = parent_ino;
+    dcache[idx].ino = ino;
+    strcpy(dcache[idx].name, name);
+    dcache[idx].valid = 1;
+}
+
+static int dcache_lookup(uint32_t parent_ino, char *name)
+{
+    uint32_t idx = dcache_hash(parent_ino, name);
+    if (dcache[idx].valid && dcache[idx].parent_ino == parent_ino && strcmp(dcache[idx].name, name) == 0) {
+        return dcache[idx].ino;
+    }
+    return -1;
+}
+
+static void dcache_del(uint32_t parent_ino, char *name)
+{
+    uint32_t idx = dcache_hash(parent_ino, name);
+    if (dcache[idx].valid && dcache[idx].parent_ino == parent_ino && strcmp(dcache[idx].name, name) == 0) {
+        dcache[idx].valid = 0;
+    }
+}
+
 static int find_entry(uint32_t dir_ino, char *name, dentry_t *entry)
 {
+    // 1. Look in Dcache (Only if enabled)
+    if (dcache_enable) {
+        int cached_ino = dcache_lookup(dir_ino, name);
+        if (cached_ino != -1) {
+            entry->ino = cached_ino;
+            strcpy(entry->name, name);
+            return 0;
+        }
+    }
+
+    // 2. Look in Disk (Directory Blocks)
     inode_t inode;
     get_inode(dir_ino, &inode);
     if (inode.mode != IM_DIR) return -1;
@@ -405,6 +495,11 @@ static int find_entry(uint32_t dir_ino, char *name, dentry_t *entry)
         for (uint32_t j = 0; j < dentries_per_block && num_dentries > 0; j++, num_dentries--) {
             if (strcmp(dentries[j].name, name) == 0) {
                 memcpy((uint8_t *)entry, (uint8_t *)&dentries[j], sizeof(dentry_t));
+                
+                // 3. Add to Dcache (Only if enabled)
+                if (dcache_enable) {
+                    dcache_add(dir_ino, name, dentries[j].ino);
+                }
                 return 0;
             }
         }
@@ -478,6 +573,19 @@ void init_fs(void)
 
 int do_mkfs(void)
 {
+    /* Invalidate Page Cache */
+    spin_lock_acquire(&cache_lock);
+    for (int i = 0; i < CACHE_SIZE; i++) {
+        page_cache[i].valid = 0;
+        page_cache[i].dirty = 0; 
+    }
+    spin_lock_release(&cache_lock);
+
+    /* Invalidate Directory Entry Cache (Dcache) */
+    for (int i = 0; i < DCACHE_SIZE; i++) {
+        dcache[i].valid = 0;
+    }
+
     uint32_t fs_size_bytes = 512 * 1024 * 1024;
     uint32_t fs_size_blocks = fs_size_bytes / BLOCK_SIZE;
     uint32_t fs_size_sectors = fs_size_bytes / SECTOR_SIZE;

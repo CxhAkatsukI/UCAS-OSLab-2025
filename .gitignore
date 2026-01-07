@@ -4,4 +4,5 @@ build
 createimage
 .asm-lsp.toml
 compile_commands.json
+.tmp_doc/
 *.txt

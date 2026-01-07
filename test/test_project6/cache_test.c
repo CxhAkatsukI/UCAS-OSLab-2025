@@ -19,6 +19,13 @@ void test_read_cache()
     }
     sys_lseek(fd, 0, SEEK_SET);
 
+    // Clear Cache to ensure Cold Read
+    printf("Clearing cache for Cold Read...\n");
+    int cfd = sys_open("/proc/sys/vm", O_RDWR);
+    sys_f_write(cfd, "clear_cache = 1\n", 16);
+    sys_close(cfd);
+    sys_fs_sync(); // Trigger update
+
     // First Read (Cold Cache)
     long start = sys_get_tick();
     for (int i = 0; i < FILE_SIZE / 4096; i++) {
@@ -48,6 +55,7 @@ void test_write_performance()
     int cfd = sys_open("/proc/sys/vm", O_RDWR);
     sys_f_write(cfd, "page_cache_policy = 0\nwrite_back_freq = 30\n", 44);
     sys_close(cfd);
+    sys_fs_sync(); // Force update policy
     sys_sleep(1); // Wait for sync if needed
 
     int fd = sys_open("write_test.bin", O_RDWR);
@@ -64,6 +72,7 @@ void test_write_performance()
     cfd = sys_open("/proc/sys/vm", O_RDWR);
     sys_f_write(cfd, "page_cache_policy = 1\nwrite_back_freq = 30\n", 44);
     sys_close(cfd);
+    sys_fs_sync(); // Force update policy
     sys_sleep(1);
 
     fd = sys_open("write_test_wb.bin", O_RDWR);
@@ -79,19 +88,60 @@ void test_write_performance()
 void test_metadata()
 {
     printf("\n--- Metadata Performance Test ---\n");
-    printf("Creating 100 files (5000 might be too slow for current shell)...\n");
+    printf("Creating 100 files...\n");
     int cfd = sys_open("/proc/sys/vm", O_RDWR);
     sys_f_write(cfd, "page_cache_policy = 0\nwrite_back_freq = 30\n", 44);
+    sys_close(cfd); // Ensure we are in a known state (optional)
+
     char name[16];
-    long start = sys_get_tick();
+    // Create files
     for (int i = 0; i < 100; i++) {
         itoa(i, name, 16, 10);
         strcat(name, ".txt");
         int fd = sys_open(name, O_RDWR);
         sys_close(fd);
     }
+
+    // 1. With Dcache
+    printf("Testing with Dcache ENABLED...\n");
+    cfd = sys_open("/proc/sys/vm", O_RDWR);
+    sys_f_write(cfd, "dcache_enable = 1\n", 18);
+    sys_close(cfd);
+    sys_fs_sync();
+
+    long start = sys_get_tick();
+    for (int k = 0; k < 10; k++) { // Repeat to amplify difference
+        for (int i = 0; i < 100; i++) {
+            itoa(i, name, 16, 10);
+            strcat(name, ".txt");
+            int fd = sys_open(name, O_RDONLY);
+            if (fd >= 0) sys_close(fd);
+        }
+    }
     long end = sys_get_tick();
-    printf("Time to create 100 files: %ld ticks\n", end - start);
+    printf("Dcache ENABLED Ticks: %ld\n", end - start);
+
+    // 2. Without Dcache
+    printf("Testing with Dcache DISABLED...\n");
+    cfd = sys_open("/proc/sys/vm", O_RDWR);
+    sys_f_write(cfd, "dcache_enable = 0\nclear_cache = 1\n", 34); // Also clear cache to ensure no block cache help? 
+    // Actually dcache is separate. But clearing block cache might slow down directory block reading too, 
+    // which is what we want to test (dcache avoids reading directory blocks).
+    // Let's just disable dcache.
+    sys_close(cfd);
+    sys_fs_sync();
+
+    start = sys_get_tick();
+    for (int k = 0; k < 10; k++) {
+        for (int i = 0; i < 100; i++) {
+            itoa(i, name, 16, 10);
+            strcat(name, ".txt");
+            int fd = sys_open(name, O_RDONLY);
+            if (fd >= 0) sys_close(fd);
+        }
+    }
+    end = sys_get_tick();
+    printf("Dcache DISABLED Ticks: %ld\n", end - start);
 }
 
 int main(void)

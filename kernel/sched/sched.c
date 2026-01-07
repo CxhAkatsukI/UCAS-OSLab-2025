@@ -413,13 +413,24 @@ static int mm_init_pcb_vm(pcb_t *pcb)
  */
 static uintptr_t mm_setup_user_stack(pcb_t *pcb, int argc, char *argv[])
 {
-    /* 1. Allocate physical page for User Stack top */
-    uintptr_t user_stack_base_va = USER_STACK_ADDR - USER_STACK_PAGES * PAGE_SIZE;
-    uintptr_t user_stack_page_kva = alloc_page_helper(user_stack_base_va, pcb->pgdir);
-    for (int i = 1; i < USER_STACK_PAGES; i++) {
-        alloc_page_helper(user_stack_base_va + i * PAGE_SIZE, pcb->pgdir);
+    uintptr_t user_stack_top_kva = 0;
+
+    /* 1. Allocate physical pages for User Stack */
+    // We allocate from top (USER_STACK_ADDR) down to bottom
+    for (int i = 0; i < USER_STACK_PAGES; i++) {
+        // Calculate the start VA of the current page
+        // e.g., i=0 -> Top Page, i=USER_STACK_PAGES-1 -> Bottom Page
+        uintptr_t va = USER_STACK_ADDR - (i + 1) * PAGE_SIZE;
+        
+        uintptr_t kva = alloc_page_helper(va, pcb->pgdir);
+
+        // We need to remember the KVA of the top-most page (i=0)
+        // because that's where we write argc/argv.
+        if (i == 0) {
+            user_stack_top_kva = kva;
+        }
     }
-    
+
     /* 2. Calculate size for strings */
     int total_str_len = 0;
     for (int i = 0; i < argc; ++i) {
@@ -427,7 +438,8 @@ static uintptr_t mm_setup_user_stack(pcb_t *pcb, int argc, char *argv[])
     }
 
     /* 3. Calculate pointers in Kernel Virtual Address (KVA) */
-    char *page_top = (char *)(user_stack_page_kva + PAGE_SIZE);
+    // We use user_stack_top_kva because the stack grows down from here
+    char *page_top = (char *)(user_stack_top_kva + PAGE_SIZE);
     char *str_area_base = page_top - total_str_len;
     
     /* argv array starts below strings. +1 for NULL terminator */
@@ -438,19 +450,22 @@ static uintptr_t mm_setup_user_stack(pcb_t *pcb, int argc, char *argv[])
 
     /* 5. Copy Data */
     char *curr_str_dest = str_area_base;
-    uintptr_t kva_to_uva_offset = USER_STACK_ADDR - (uintptr_t)(user_stack_page_kva + PAGE_SIZE);
+    
+    // Offset to translate KVA (where we are writing) to UVA (what the user sees)
+    // This offset is valid for the top page.
+    uintptr_t kva_to_uva_offset = USER_STACK_ADDR - (uintptr_t)(user_stack_top_kva + PAGE_SIZE);
 
     for (int i = 0; i < argc; ++i) {
         strcpy(curr_str_dest, argv[i]);
         
-        /* Store pointer as User Virtual Address, not KVA */
+        /* Store pointer as User Virtual Address (UVA), not KVA */
         argv_array_base[i] = (char *)((uintptr_t)curr_str_dest + kva_to_uva_offset);
 
         curr_str_dest += strlen(argv[i]) + 1;
     }
     argv_array_base[argc] = NULL;
 
-    /* 6. Return final User SP */
+    /* 6. Return final User SP (in UVA) */
     return (uintptr_t)argv_array_base + kva_to_uva_offset;
 }
 

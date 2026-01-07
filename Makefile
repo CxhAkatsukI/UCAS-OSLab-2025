@@ -204,6 +204,6 @@ $(ELF_CREATEIMAGE): $(SRC_CREATEIMAGE)
 
 image: $(ELF_CREATEIMAGE) $(ELF_BOOT) $(ELF_MAIN) $(ELF_USER)
 	cd $(DIR_BUILD) && ./$(<F) --extended $(filter-out $(<F), $(^F)) 
-	@dd if=/dev/zero of=$(ELF_IMAGE) oflag=append conv=notrunc bs=1M count=1024
+	# @dd if=/dev/zero of=$(ELF_IMAGE) oflag=append conv=notrunc bs=1M count=1024
 
 .PHONY: image
