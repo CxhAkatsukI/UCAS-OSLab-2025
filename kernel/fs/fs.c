@@ -974,6 +974,10 @@ int do_rm(char *path)
     }
     if (!found) return -1;
 
+    if (dcache_enable) {
+        dcache_del(parent_ino, name);
+    }
+
     /* Swap with last dentry */
     uint32_t last_idx = (num_dentries - 1) % per_block;
     uint32_t last_lb = (num_dentries - 1) / per_block;
