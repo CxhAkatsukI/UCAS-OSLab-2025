@@ -1,0 +1,8 @@
+.vscode
+build
+.cache/
+createimage
+.asm-lsp.toml
+compile_commands.json
+.tmp_doc/
+*.txt

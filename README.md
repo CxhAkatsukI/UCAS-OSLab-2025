@@ -107,3 +107,10 @@ The main focus of this course is to build an operating system kernel from the gr
 *   **Collaborate:** Discuss ideas and problems with your peers.
 *   **Use Version Control:** Make incremental commits to your Git repository.
 *   **Consult XV6:** The XV6 operating system source code can be a helpful reference.
+
+---
+
+## How to Use This Repo
+
+*   **Go to the Respective Branch**: The code for each project is on a respective branch. You can go to that branch to find the dedicated `README.md` and `development_note.md` for that project.
+*   **The Main Branch**: Code for project 6 is currently merged into the main branch. But I suggest you to go to project 6's branch for its code.
